@@ -1,0 +1,20 @@
+{
+    "doors" : [
+        {
+            "name" : "Garage Door",
+            "manufacturer" : "A Door Company",
+            "model" : "MT-1234",
+            "serialNumber" : "1234567890",
+            "pushButton" : 16,
+            "closedSensor" : 26,
+            "openSensor" : 20,
+            "openTime" : 25000,
+            "closeTime" : 25000
+        }
+    ],
+    "options": {
+        "debug": false,
+        "eveHistory": true,
+        "hkPairingCode": "031-45-154"
+    }
+}
