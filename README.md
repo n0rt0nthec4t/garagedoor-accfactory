@@ -2,7 +2,7 @@
 
 # HomeKit GarageDoor Opener System
 
-[![version](https://img.shields.io/github/package-json/v/n0rt0nthec4t/GarageDoor_Accfactory)](https://img.shields.io/github/package-json/v/n0rt0nthec4t/GarageDoor_Accfactory)
+[![version](https://img.shields.io/github/package-json/v/n0rt0nthec4t/garagedoor-accfactory)](https://img.shields.io/github/package-json/v/n0rt0nthec4t/garagedoor-accfactory)
 
 </span>
 
@@ -14,7 +14,7 @@
 
 ## Garage Door Configuration
 
-The following options are available in GarageDoor_config.json **doors** object, which is a array of defined garage doors.
+The following options are available in garagedoor_config.json **doors** object, which is a array of defined garage doors.
 
 eg:
 ```
@@ -49,7 +49,7 @@ eg:
 
 ### Configuration Options
 
-The following options are available in GarageDoor_config.json **options** object.
+The following options are available in garagedoor_config.json **options** object.
 
 | Name              | Description                                                                                   | Default    |
 |-------------------|-----------------------------------------------------------------------------------------------|------------|

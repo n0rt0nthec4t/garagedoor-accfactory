@@ -36,7 +36,7 @@ import { EventEmitter } from 'node:events';
 import GarageDoor from './door.js';
 
 import HomeKitDevice from './HomeKitDevice.js';
-HomeKitDevice.PLUGIN_NAME = 'garagedoor_accfactory';
+HomeKitDevice.PLUGIN_NAME = 'garagedoor-accfactory';
 HomeKitDevice.PLATFORM_NAME = 'GarageDoorAccfactory';
 
 import HomeKitHistory from './HomeKitHistory.js';
