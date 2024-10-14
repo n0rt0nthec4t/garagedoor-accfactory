@@ -1,4 +1,4 @@
-// Code version 14/10/2024
+// Code version 15/10/2024
 // Mark Hulskamp
 'use strict';
 
@@ -71,7 +71,7 @@ export default class GarageDoor extends HomeKitDevice {
       // Push button
       GPIO.open(this.deviceData.pushButton, GPIO.OUTPUT, GPIO.LOW);
       this?.log?.debug &&
-        this.log.debug('Setting up open/close relay on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.pushButton);
+        this.log.debug('Setup open/close relay on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.pushButton);
     }
 
     if (this.deviceData.closedSensor !== undefined && this.deviceData.closedSensor >= 0 && this.deviceData.closedSensor <= 26) {
@@ -79,18 +79,14 @@ export default class GarageDoor extends HomeKitDevice {
       GPIO.open(this.deviceData.closedSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       postSetupDetails.push('Door closed sensor');
       this?.log?.debug &&
-        this.log.debug(
-          'Setting up closed door sensor on "%s" using GPIO pin "%s"',
-          this.deviceData.description,
-          this.deviceData.closedSensor,
-        );
+        this.log.debug('Setup closed door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.closedSensor);
     }
     if (this.deviceData.openSensor !== undefined && this.deviceData.openSensor >= 0 && this.deviceData.openSensor <= 26) {
       // Door open sensor
       GPIO.open(this.deviceData.openSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       postSetupDetails.push('Door open sensor');
       this?.log?.debug &&
-        this.log.debug('Setting up open door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.openSensor);
+        this.log.debug('Setup open door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.openSensor);
     }
 
     if (
@@ -102,11 +98,7 @@ export default class GarageDoor extends HomeKitDevice {
       GPIO.open(this.deviceData.obstructionSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       postSetupDetails.push('Obstruction sensor');
       this?.log?.debug &&
-        this.log.debug(
-          'Setting up obstruction sensor on "%s" using GPIO pin "%s"',
-          this.deviceData.description,
-          this.deviceData.openSensor,
-        );
+        this.log.debug('Setup obstruction sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.openSensor);
     }
 
     // Setup callbacks for characteristics
@@ -216,7 +208,7 @@ export default class GarageDoor extends HomeKitDevice {
         if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
           // Log door closed to history service if present
           let tempEntry = this.historyService.lastHistory(this.doorService);
-          if (tempEntry === null || (typeof tempEntry === 'object' && tempEntry.status !== 0)) {
+          if (tempEntry?.status !== 0) {
             this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 0 }); // closed
           }
         }
@@ -233,7 +225,7 @@ export default class GarageDoor extends HomeKitDevice {
         if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
           // Log door opened to history service if present
           let tempEntry = this.historyService.lastHistory(this.doorService);
-          if (tempEntry === null || (typeof tempEntry === 'object' && tempEntry.status !== 1)) {
+          if (tempEntry?.status !== 1) {
             this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 1 }); // open
           }
         }
@@ -270,7 +262,7 @@ export default class GarageDoor extends HomeKitDevice {
           if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
             // Log door opened to history service if present
             let tempEntry = this.historyService.lastHistory(this.doorService);
-            if (tempEntry === null || (typeof tempEntry === 'object' && tempEntry.status !== 1)) {
+            if (tempEntry?.status !== 1) {
               this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 1 }); // open
             }
           }
