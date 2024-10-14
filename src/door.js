@@ -57,8 +57,9 @@ export default class GarageDoor extends HomeKitDevice {
     }
     this.doorService.setPrimaryService();
 
-    this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT); // No fault with sensors yet
-    this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.STOPPED); // Door is stopped by default
+    // Setup intial characteristic values
+    this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
+    this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.STOPPED);
 
     // Setup GPIO pins
     if (this.deviceData.pushButton === undefined || (this.deviceData.pushButton < 0 && this.deviceData.pushButton > 26)) {
@@ -69,17 +70,27 @@ export default class GarageDoor extends HomeKitDevice {
     if (this.deviceData.pushButton !== undefined && this.deviceData.pushButton >= 0 && this.deviceData.pushButton <= 26) {
       // Push button
       GPIO.open(this.deviceData.pushButton, GPIO.OUTPUT, GPIO.LOW);
+      this?.log?.debug &&
+        this.log.debug('Setting up open/close relay on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.pushButton);
     }
 
     if (this.deviceData.closedSensor !== undefined && this.deviceData.closedSensor >= 0 && this.deviceData.closedSensor <= 26) {
       // Door closed sensor
       GPIO.open(this.deviceData.closedSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       postSetupDetails.push('Door closed sensor');
+      this?.log?.debug &&
+        this.log.debug(
+          'Setting up closed door sensor on "%s" using GPIO pin "%s"',
+          this.deviceData.description,
+          this.deviceData.closedSensor,
+        );
     }
     if (this.deviceData.openSensor !== undefined && this.deviceData.openSensor >= 0 && this.deviceData.openSensor <= 26) {
       // Door open sensor
       GPIO.open(this.deviceData.openSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       postSetupDetails.push('Door open sensor');
+      this?.log?.debug &&
+        this.log.debug('Setting up open door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.openSensor);
     }
 
     if (
@@ -90,6 +101,12 @@ export default class GarageDoor extends HomeKitDevice {
       // Door obstruction sensor
       GPIO.open(this.deviceData.obstructionSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       postSetupDetails.push('Obstruction sensor');
+      this?.log?.debug &&
+        this.log.debug(
+          'Setting up obstruction sensor on "%s" using GPIO pin "%s"',
+          this.deviceData.description,
+          this.deviceData.openSensor,
+        );
     }
 
     // Setup callbacks for characteristics
@@ -114,7 +131,6 @@ export default class GarageDoor extends HomeKitDevice {
     }
 
     // Setup interval to check the door status
-    setInterval(this.#doorStatusLoop.bind(this), 500); // Door status polling loop
     this.#statusTimer = setInterval(() => {
       this.#doorStatusLoop();
     }, 500);
@@ -188,7 +204,7 @@ export default class GarageDoor extends HomeKitDevice {
     return GPIO.read(this.deviceData.obstructionSensor) === GPIO.HIGH ? true : false; // If high, obstruction detected
   }
 
-  messageHomeKitServices(type, message) {
+  messageServices(type, message) {
     if (type === GarageDoor.DOOREVENT) {
       if (message.status === 'closed' && this.currentDoorStatus !== 'closed') {
         // Closed
@@ -284,14 +300,15 @@ export default class GarageDoor extends HomeKitDevice {
     let doorClosed = this.isClosed();
     let obstruction = this.hasObstruction();
 
-    // Work out the current status of the door. This will either be "open", "closed", "moving", "stopped"
+    // Work out the current status of the door using configured sensors.
+    // This will either be "open", "closed", "moving", "stopped"
     // We'll send a message about its status once determined
     if (doorClosed === true && doorOpen === false) {
       // Door is fully closed
       this.movingTimer = 0;
       this.#lastDoorStatus = 'closed';
       if (this.#eventEmitter !== undefined) {
-        this.#eventEmitter.emit(this.deviceData.uuid, GarageDoor.DOOREVENT, { status: 'closed' });
+        this.#eventEmitter.emit(this.uuid, GarageDoor.DOOREVENT, { status: 'closed' });
       }
     }
     if (doorClosed === false && doorOpen === true) {
@@ -299,7 +316,7 @@ export default class GarageDoor extends HomeKitDevice {
       this.movingTimer = 0;
       this.#lastDoorStatus = 'open';
       if (this.#eventEmitter !== undefined) {
-        this.#eventEmitter.emit(this.deviceData.uuid, GarageDoor.DOOREVENT, { status: 'open' });
+        this.#eventEmitter.emit(this.uuid, GarageDoor.DOOREVENT, { status: 'open' });
       }
     }
     if (doorClosed === false && doorOpen === false) {
@@ -325,11 +342,11 @@ export default class GarageDoor extends HomeKitDevice {
         // In this case we'll assume door has stopped
         this.#lastDoorStatus = 'stopped';
         if (this.#eventEmitter !== undefined) {
-          this.#eventEmitter.emit(this.deviceData.uuid, GarageDoor.DOOREVENT, { status: 'stopped' });
+          this.#eventEmitter.emit(this.uuid, GarageDoor.DOOREVENT, { status: 'stopped' });
         }
       } else {
         if (this.#eventEmitter !== undefined) {
-          this.#eventEmitter.emit(this.deviceData.uuid, GarageDoor.DOOREVENT, {
+          this.#eventEmitter.emit(this.uuid, GarageDoor.DOOREVENT, {
             status: 'moving',
             last: this.#lastDoorStatus,
             duration: duration,
@@ -339,12 +356,16 @@ export default class GarageDoor extends HomeKitDevice {
     }
     if (doorClosed === true && doorOpen === true) {
       // Is reading both open and close, we'll assume fault with sensors
-      this.#eventEmitter.emit(this.deviceData.uuid, GarageDoor.DOOREVENT, { status: 'fault', last: this.#lastDoorStatus });
+      if (this.#eventEmitter !== undefined) {
+        this.#eventEmitter.emit(this.uuid, GarageDoor.DOOREVENT, { status: 'fault', last: this.#lastDoorStatus });
+      }
     }
 
     if (obstruction !== undefined) {
       // Since obstruction didn't return an undefined value, this means we have a configured obstruction sensor and its returned its status
-      this.#eventEmitter.emit(this.deviceData.uuid, GarageDoor.DOOREVENT, { status: obstruction === true ? 'obstruction' : 'clear' });
+      if (this.#eventEmitter !== undefined) {
+        this.#eventEmitter.emit(this.uuid, GarageDoor.DOOREVENT, { status: obstruction === true ? 'obstruction' : 'clear' });
+      }
     }
   }
 }

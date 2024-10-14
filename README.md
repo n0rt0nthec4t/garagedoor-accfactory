@@ -10,6 +10,7 @@
 
 - Raspberry Pi Zero W
 - Pimoroni automation phat (not sure if sold anymore?)
+- Reed-relay magnetic sensors
 
 ## Garage Door Configuration
 
