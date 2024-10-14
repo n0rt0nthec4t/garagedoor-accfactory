@@ -269,9 +269,9 @@ export default class GarageDoor extends HomeKitDevice {
 
           if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
             // Log door opened to history service if present
-            let tempEntry = this.HomeKitHistory.lastHistory(this.doorService);
+            let tempEntry = this.historyService.lastHistory(this.doorService);
             if (tempEntry === null || (typeof tempEntry === 'object' && tempEntry.status !== 1)) {
-              this.HomeKitHistory.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 1 }); // open
+              this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 1 }); // open
             }
           }
           this?.log?.debug && this.log.debug('Door "%s" has stopped moving', this.deviceData.description);
