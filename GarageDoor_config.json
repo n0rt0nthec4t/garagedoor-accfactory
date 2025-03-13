@@ -8,8 +8,8 @@
             "pushButton" : 16,
             "closedSensor" : 26,
             "openSensor" : 20,
-            "openTime" : 25000,
-            "closeTime" : 25000
+            "openTime" : 30,
+            "closeTime" : 30
         }
     ],
     "options": {
