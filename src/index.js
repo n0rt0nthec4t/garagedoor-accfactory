@@ -12,10 +12,12 @@
 // GPIO6	Output 3
 // GPIO16	Relay 1
 //
+// Usage: node dist/index.js [optional-config.json]
+//
 // todo
 // -- Get obstruction code working and verifed
 //
-// Version 13/10/2024
+// Code Version 2025/06/15
 // Mark Hulskamp
 'use strict';
 
@@ -63,7 +65,7 @@ function loadConfiguration(filename) {
   let config = undefined;
 
   try {
-    let loadedConfig = JSON.parse(fs.readFileSync(filename));
+    let loadedConfig = JSON.parse(fs.readFileSync(filename, 'utf8').trim());
 
     config = {
       doors: [],
@@ -81,36 +83,47 @@ function loadConfiguration(filename) {
         value.forEach((door) => {
           let tempDoor = {
             hkUsername:
-              door?.hkUsername !== undefined && door.hkUsername !== ''
+              typeof door?.hkUsername === 'string' && door.hkUsername !== ''
                 ? door.hkUsername.trim()
                 : crypto
-                    .randomBytes(6)
-                    .toString('hex')
-                    .toUpperCase()
-                    .split(/(..)/)
-                    .filter((s) => s)
-                    .join(':'),
-            name: door?.name !== undefined && door.name !== '' ? makeHomeKitName(door.name.trim()) : 'Door ' + unnamedCount++,
-            manufacturer: door?.manufacturer !== undefined && door.manufacturer !== '' ? door.manufacturer.trim() : '',
-            model: door?.model !== undefined && door.model !== '' ? door.model.trim() : '',
+                  .randomBytes(6)
+                  .toString('hex')
+                  .toUpperCase()
+                  .split(/(..)/)
+                  .filter((s) => s)
+                  .join(':'),
+            name:
+              typeof door?.name === 'string' && door.name !== ''
+                ? HomeKitDevice.makeHomeKitName(door.name.trim())
+                : 'Door ' + unnamedCount++,
+            manufacturer: typeof door?.manufacturer === 'string' && door.manufacturer !== '' ? door.manufacturer.trim() : '',
+            model: typeof door?.model === 'string' && door.model !== '' ? door.model.trim() : '',
             serialNumber:
-              door?.serialNumber !== undefined && door.serialNumber !== ''
+              typeof door?.serialNumber === 'string' && door.serialNumber !== ''
                 ? door.serialNumber.trim()
                 : crc32(crypto.randomUUID().toUpperCase()).toString(),
             pushButton:
-              isNaN(door?.pushButton) === false && Number(door.pushButton) >= 0 && Number(door.pushButton) <= 26
+              isNaN(door?.pushButton) === false &&
+              Number(door.pushButton) >= GarageDoor.MIN_GPIO_PIN &&
+              Number(door.pushButton) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.pushButton)
                 : undefined,
             closedSensor:
-              isNaN(door?.closedSensor) === false && Number(door.closedSensor) >= 0 && Number(door.closedSensor) <= 26
+              isNaN(door?.closedSensor) === false &&
+              Number(door.closedSensor) >= GarageDoor.MIN_GPIO_PIN &&
+              Number(door.closedSensor) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.closedSensor)
                 : undefined,
             openSensor:
-              isNaN(door?.openSensor) === false && Number(door.openSensor) >= 0 && Number(door.openSensor) <= 26
+              isNaN(door?.openSensor) === false &&
+              Number(door.openSensor) >= GarageDoor.MIN_GPIO_PIN &&
+              Number(door.openSensor) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.openSensor)
                 : undefined,
             obstructionSensor:
-              isNaN(door?.obstructionSensor) === false && Number(door.obstructionSensor) >= 0 && Number(door.obstructionSensor) <= 26
+              isNaN(door?.obstructionSensor) === false &&
+              Number(door.obstructionSensor) >= GarageDoor.MIN_GPIO_PIN &&
+              Number(door.obstructionSensor) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.obstructionSensor)
                 : undefined,
             openTime: isNaN(door?.openTime) === false && Number(door.openTime) >= 0 && Number(door.openTime) <= 300 ? door.openTime : 30,
@@ -125,8 +138,7 @@ function loadConfiguration(filename) {
         config.options.debug = value?.debug === true;
         config.options.eveHistory = value?.eveHistory === true;
         config.options.hkPairingCode =
-          new RegExp(/^([0-9]{3}-[0-9]{2}-[0-9]{3})$/).test(value?.hkPairingCode) === true ||
-          new RegExp(/^([0-9]{4}-[0-9]{4})$/).test(value?.hkPairingCode) === true
+          HomeKitDevice.HK_PIN_3_2_3.test(value?.hkPairingCode) === true || HomeKitDevice.HK_PIN_4_4.test(value?.hkPairingCode) === true
             ? value.hkPairingCode
             : ACCESSORYPINCODE;
       }
@@ -182,30 +194,16 @@ function crc32(valueToHash) {
   return crc32 >>> 0; // return crc32
 }
 
-function makeHomeKitName(nameToMakeValid) {
-  // Strip invalid characters to meet HomeKit naming requirements
-  // Ensure only letters or numbers are at the beginning AND/OR end of string
-  // Matches against uni-code characters
-  return typeof nameToMakeValid === 'string'
-    ? nameToMakeValid
-        .replace(/[^\p{L}\p{N}\p{Z}\u2019.,-]/gu, '')
-        .replace(/^[^\p{L}\p{N}]*/gu, '')
-        .replace(/[^\p{L}\p{N}]+$/gu, '')
-    : nameToMakeValid;
-}
-
 // Startup code
 log.success(HomeKitDevice.PLUGIN_NAME + ' v' + version + ' (HAP v' + HAP.HAPLibraryVersion() + ') (Node v' + process.versions.node + ')');
 
 // Check to see if a configuration file was passed into use and validate if present
-let configurationFile = path.resolve(__dirname + '/' + CONFIGURATIONFILE);
-if (process.argv.slice(2).length === 1) {
-  // We only support/process one argument
-  configurationFile = process.argv.slice(2)[0]; // Extract the file name from the argument passed in
-  if (configurationFile.indexOf('/') === -1) {
-    configurationFile = path.resolve(__dirname + '/' + configurationFile);
-  }
+let configurationFile = path.resolve(__dirname, CONFIGURATIONFILE);
+let argFile = process.argv[2];
+if (typeof argFile === 'string') {
+  configurationFile = path.isAbsolute(argFile) ? argFile : path.resolve(process.cwd(), argFile);
 }
+
 if (fs.existsSync(configurationFile) === false) {
   // Configuration file, either by default name or specified on commandline is missing
   log.error('Specified configuration "%s" cannot be found', configurationFile);
@@ -216,8 +214,7 @@ if (fs.existsSync(configurationFile) === false) {
 // Have a configuration file, now load the configuration options
 let config = loadConfiguration(configurationFile);
 if (config === undefined) {
-  log.info('Configuration file contains invalid JSON options');
-  log.info('Exiting.');
+  log.error('Configuration "%s" contains invalid JSON or structure', configurationFile);
   process.exit(1);
 }
 
@@ -238,21 +235,22 @@ if (config?.options?.debug === true) {
 
 // For each door in our configuration, create the HomeKit accessory
 config.doors.forEach((door) => {
-  let deviceData = {};
-  deviceData.hkPairingCode = config.options.hkPairingCode;
-  deviceData.hkUsername = door.hkUsername;
-  deviceData.serialNumber = door.serialNumber;
-  deviceData.softwareVersion = version;
-  deviceData.manufacturer = door.manufacturer;
-  deviceData.description = door.manufacturer + ' ' + door.model;
-  deviceData.model = door.model;
-  deviceData.eveHistory = config.options.eveHistory;
-  deviceData.pushButton = door.pushButton;
-  deviceData.openSensor = door.openSensor;
-  deviceData.closedSensor = door.closedSensor;
-  deviceData.obstructionSensor = door.obstructionSensor;
-  deviceData.openTime = door.openTime;
-  deviceData.closeTime = door.closeTime;
+  let deviceData = {
+    hkPairingCode: config.options.hkPairingCode,
+    hkUsername: door.hkUsername,
+    serialNumber: door.serialNumber,
+    softwareVersion: version,
+    manufacturer: door.manufacturer,
+    model: door.model,
+    description: (door.manufacturer + ' ' + door.model).trim() || 'Garage Door',
+    eveHistory: config.options.eveHistory,
+    pushButton: door.pushButton,
+    openSensor: door.openSensor,
+    closedSensor: door.closedSensor,
+    obstructionSensor: door.obstructionSensor,
+    openTime: door.openTime,
+    closeTime: door.closeTime,
+  };
   let tempDevice = new GarageDoor(undefined, HAP, log, eventEmitter, deviceData);
   tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
 });
