@@ -17,12 +17,12 @@
 // todo
 // -- Get obstruction code working and verifed
 //
-// Code Version 2025/06/15
+// Code Version 2025/06/18
 // Mark Hulskamp
 'use strict';
 
 // Define HAP-NodeJS module requirements
-import HAP from 'hap-nodejs';
+import HAP from '@homebridge/hap-nodejs';
 
 // Define nodejs module requirements
 import process from 'node:process';
@@ -32,7 +32,6 @@ import crypto from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { EventEmitter } from 'node:events';
 
 // Import our modules
 import GarageDoor from './door.js';
@@ -47,16 +46,13 @@ HomeKitDevice.HISTORY = HomeKitHistory;
 import Logger from './logger.js';
 const log = Logger.withPrefix(HomeKitDevice.PLATFORM_NAME);
 
-// Import the package.json file to get the version number
-const { version } = createRequire(import.meta.url)('../package.json');
-
+// Define constants
+const { version } = createRequire(import.meta.url)('../package.json'); // Import the package.json file to get the version number
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // Make a defined for JS __dirname
-const ACCESSORYPINCODE = '031-45-154'; // Default HomeKit pairing code
-const CONFIGURATIONFILE = 'GarageDoor.json'; // Default configuration file name
+const ACCESSORY_PINCODE = '031-45-154'; // Default HomeKit pairing code
+const CONFIGURATION_FILE = 'GarageDoor.json'; // Default configuration file name
 
-const eventEmitter = new EventEmitter();
-
-// General helper functions which don't need to be part of an object class
+// General helper functions
 function loadConfiguration(filename) {
   if (typeof filename !== 'string' || filename === '' || fs.existsSync(filename) === false) {
     return;
@@ -72,7 +68,7 @@ function loadConfiguration(filename) {
       options: {
         debug: false,
         eveHistory: true,
-        hkPairingCode: ACCESSORYPINCODE,
+        hkPairingCode: ACCESSORY_PINCODE,
       },
     };
 
@@ -86,15 +82,15 @@ function loadConfiguration(filename) {
               typeof door?.hkUsername === 'string' && door.hkUsername !== ''
                 ? door.hkUsername.trim()
                 : crypto
-                  .randomBytes(6)
-                  .toString('hex')
-                  .toUpperCase()
-                  .split(/(..)/)
-                  .filter((s) => s)
-                  .join(':'),
+                    .randomBytes(6)
+                    .toString('hex')
+                    .toUpperCase()
+                    .split(/(..)/)
+                    .filter((s) => s)
+                    .join(':'),
             name:
               typeof door?.name === 'string' && door.name !== ''
-                ? HomeKitDevice.makeHomeKitName(door.name.trim())
+                ? HomeKitDevice.makeValidHKName(door.name.trim())
                 : 'Door ' + unnamedCount++,
             manufacturer: typeof door?.manufacturer === 'string' && door.manufacturer !== '' ? door.manufacturer.trim() : '',
             model: typeof door?.model === 'string' && door.model !== '' ? door.model.trim() : '',
@@ -140,7 +136,7 @@ function loadConfiguration(filename) {
         config.options.hkPairingCode =
           HomeKitDevice.HK_PIN_3_2_3.test(value?.hkPairingCode) === true || HomeKitDevice.HK_PIN_4_4.test(value?.hkPairingCode) === true
             ? value.hkPairingCode
-            : ACCESSORYPINCODE;
+            : ACCESSORY_PINCODE;
       }
     });
 
@@ -155,7 +151,6 @@ function loadConfiguration(filename) {
   return config;
 }
 
-// General helper functions which don't need to be part of an object class
 function crc32(valueToHash) {
   let crc32HashTable = [
     0x000000000, 0x077073096, -0x11f19ed4, -0x66f6ae46, 0x0076dc419, 0x0706af48f, -0x169c5acb, -0x619b6a5d, 0x00edb8832, 0x079dcb8a4,
@@ -198,7 +193,7 @@ function crc32(valueToHash) {
 log.success(HomeKitDevice.PLUGIN_NAME + ' v' + version + ' (HAP v' + HAP.HAPLibraryVersion() + ') (Node v' + process.versions.node + ')');
 
 // Check to see if a configuration file was passed into use and validate if present
-let configurationFile = path.resolve(__dirname, CONFIGURATIONFILE);
+let configurationFile = path.resolve(__dirname, CONFIGURATION_FILE);
 let argFile = process.argv[2];
 if (typeof argFile === 'string') {
   configurationFile = path.isAbsolute(argFile) ? argFile : path.resolve(process.cwd(), argFile);
@@ -207,7 +202,6 @@ if (typeof argFile === 'string') {
 if (fs.existsSync(configurationFile) === false) {
   // Configuration file, either by default name or specified on commandline is missing
   log.error('Specified configuration "%s" cannot be found', configurationFile);
-  log.error('Exiting.');
   process.exit(1);
 }
 
@@ -221,7 +215,6 @@ if (config === undefined) {
 // Check to see we have atleast ONE door defined
 if (config.doors.length < 1) {
   log.info('Configuration file does not have any doors defined. Please review configuration');
-  log.info('Exiting.');
   process.exit(1);
 }
 
@@ -251,6 +244,6 @@ config.doors.forEach((door) => {
     openTime: door.openTime,
     closeTime: door.closeTime,
   };
-  let tempDevice = new GarageDoor(undefined, HAP, log, eventEmitter, deviceData);
+  let tempDevice = new GarageDoor(undefined, HAP, log, deviceData);
   tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
 });

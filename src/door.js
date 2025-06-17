@@ -6,7 +6,6 @@
 import GPIO from 'rpio';
 
 // Define nodejs module requirements
-import EventEmitter from 'node:events';
 import { setTimeout } from 'node:timers';
 
 // Import our modules
@@ -14,9 +13,9 @@ import HomeKitDevice from './HomeKitDevice.js';
 
 export default class GarageDoor extends HomeKitDevice {
   static TYPE = 'GarageDoor';
-  static VERSION = '2025.06.15';
+  static VERSION = '2025.06.18'; // Code version
 
-  static DOOREVENT = 'DOOREVENT'; // Door status event tag
+  static DOOR_EVENT = 'DOOREVENT'; // Door status event tag
 
   // Define door states
   static OPEN = 'open';
@@ -39,28 +38,22 @@ export default class GarageDoor extends HomeKitDevice {
   currentDoorStatus = undefined;
 
   // Internal data only for this class
-  #eventEmitter = undefined;
   #lastDoorStatus = undefined;
   #moveStartedTime = undefined;
 
-  constructor(accessory, api, log, eventEmitter, deviceData) {
-    super(accessory, api, log, eventEmitter, deviceData);
+  constructor(accessory, api, log, deviceData) {
+    super(accessory, api, log, deviceData);
 
     // Init the GPIO (rpio) library. This only needs to be done once before using library functions
     GPIO.init({ gpiomem: true });
     GPIO.init({ mapping: 'gpio' });
-
-    // Validate if eventEmitter object passed to us is an instance of EventEmitter
-    if (eventEmitter instanceof EventEmitter === true) {
-      this.#eventEmitter = eventEmitter;
-    }
 
     this.currentDoorStatus = GarageDoor.STOPPED;
     this.#lastDoorStatus = GarageDoor.UNKNOWN;
   }
 
   // Class functions
-  setupDevice() {
+  onAdd() {
     // Setup the garagedoor service if not already present on the accessory
     this.doorService = this.addHKService(this.hap.Service.GarageDoorOpener, '', 1);
     this.doorService.setPrimaryService();
@@ -201,8 +194,8 @@ export default class GarageDoor extends HomeKitDevice {
     return GPIO.read(this.deviceData.obstructionSensor) === GPIO.HIGH ? true : false; // If high, obstruction detected
   }
 
-  messageDevice(type, message) {
-    if (type === GarageDoor.DOOREVENT && typeof message?.status === 'string') {
+  onMessage(type, message) {
+    if (type === GarageDoor.DOOR_EVENT && typeof message?.status === 'string') {
       if (message.status === GarageDoor.CLOSED && this.currentDoorStatus !== GarageDoor.CLOSED) {
         // Closed
         this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
@@ -295,7 +288,7 @@ export default class GarageDoor extends HomeKitDevice {
     }
   }
 
-  updateDevice(deviceData) {
+  onUpdate(deviceData) {
     let doorOpen = this.isOpen();
     let doorClosed = this.isClosed();
     let obstruction = this.hasObstruction();
@@ -307,14 +300,14 @@ export default class GarageDoor extends HomeKitDevice {
       // Door is fully closed
       this.#moveStartedTime = undefined;
       this.#lastDoorStatus = GarageDoor.CLOSED;
-      this.#eventEmitter?.emit?.(this.uuid, GarageDoor.DOOREVENT, { status: GarageDoor.CLOSED });
+      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
     }
 
     if (doorClosed === false && doorOpen === true) {
       // Door is fully open
       this.#moveStartedTime = undefined;
       this.#lastDoorStatus = GarageDoor.OPENED;
-      this.#eventEmitter?.emit?.(this.uuid, GarageDoor.DOOREVENT, { status: GarageDoor.OPENED });
+      this.message(this.uuid, GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
     }
 
     if (doorClosed === false && doorOpen === false) {
@@ -348,9 +341,9 @@ export default class GarageDoor extends HomeKitDevice {
         // Since the door state isn't open or closed OR open or closed status and moving time has been exceeded for configured times
         // In this case we'll assume door has stopped
         this.#lastDoorStatus = GarageDoor.STOPPED;
-        this.#eventEmitter?.emit?.(this.uuid, GarageDoor.DOOREVENT, { status: GarageDoor.STOPPED });
+        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.STOPPED });
       } else {
-        this.#eventEmitter?.emit?.(this.uuid, GarageDoor.DOOREVENT, {
+        this.message(GarageDoor.DOOR_EVENT, {
           status: GarageDoor.MOVING,
           last: this.#lastDoorStatus,
           duration: duration,
@@ -360,19 +353,19 @@ export default class GarageDoor extends HomeKitDevice {
 
     if ((doorClosed === true && doorOpen === true) || doorClosed === undefined || doorOpen === undefined) {
       // Is reading both open and close OR no status, we'll assume fault with sensors
-      this.#eventEmitter?.emit?.(this.uuid, GarageDoor.DOOREVENT, { status: GarageDoor.FAULT, last: this.#lastDoorStatus });
+      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.FAULT, last: this.#lastDoorStatus });
     }
 
     if (obstruction !== undefined) {
       // Since obstruction didn't return an undefined value, this means we have a configured obstruction sensor and its returned its status
-      this.#eventEmitter?.emit?.(this.uuid, GarageDoor.DOOREVENT, { status: obstruction === true ? GarageDoor.OBSTRUCTION : 'clear' });
+      this.message(GarageDoor.DOOR_EVENT, { status: obstruction === true ? GarageDoor.OBSTRUCTION : 'clear' });
     }
 
     // Perform this again after a short period by issuing an device update message
-    // The updateDevice function will only be called again from this message if some data has changed
+    // The onUpdate function will only be called again from this message if some data has changed
     // We can force this by adding a "timestamp" field to the data object
     setTimeout(() => {
-      this.#eventEmitter?.emit?.(this.uuid, HomeKitDevice.UPDATE, { lastDoorCheckTime: Date.now() });
+      this.message(HomeKitDevice.UPDATE, { lastDoorCheckTime: Date.now() });
     }, 1000);
   }
 
