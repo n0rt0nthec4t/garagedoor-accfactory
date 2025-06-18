@@ -114,15 +114,7 @@ export default class GarageDoor extends HomeKitDevice {
     });
 
     // Setup linkage to EveHome app if configured todo so
-    if (
-      this.deviceData?.eveHistory === true &&
-      this.doorService !== undefined &&
-      typeof this.historyService?.linkToEveHome === 'function'
-    ) {
-      this.historyService.linkToEveHome(this.doorService, {
-        description: this.deviceData.description,
-      });
-    }
+    this.setupEveHomeLink(this.doorService);
   }
 
   setDoorPosition(value) {
@@ -203,13 +195,8 @@ export default class GarageDoor extends HomeKitDevice {
         this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.CLOSED);
         this.currentDoorStatus = GarageDoor.CLOSED;
 
-        if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
-          // Log door closed to history service if present
-          let tempEntry = this.historyService.lastHistory(this.doorService);
-          if (tempEntry?.status !== 0) {
-            this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 0 }); // closed
-          }
-        }
+        // Log door closed to history service if present
+        this.addHistory(this.doorService, { status: 0 }, { timegap: 2 });
         this?.log?.success?.('Door "%s" is closed', this.deviceData.description);
       }
 
@@ -220,13 +207,8 @@ export default class GarageDoor extends HomeKitDevice {
         this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.OPEN);
         this.currentDoorStatus = GarageDoor.OPENED;
 
-        if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
-          // Log door opened to history service if present
-          let tempEntry = this.historyService.lastHistory(this.doorService);
-          if (tempEntry?.status !== 1) {
-            this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 1 }); // open
-          }
-        }
+        // Log door opened to history service if present
+        this.addHistory(this.doorService, { status: 1 }, { timegap: 2 });
         this?.log?.warn?.('Door "%s" is open', this.deviceData.description);
       }
 
@@ -257,13 +239,8 @@ export default class GarageDoor extends HomeKitDevice {
           this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.OPEN);
           this.currentDoorStatus = GarageDoor.STOPPED;
 
-          if (typeof this.historyService?.addHistory === 'function' && this.doorService !== undefined) {
-            // Log door opened to history service if present
-            let tempEntry = this.historyService.lastHistory(this.doorService);
-            if (tempEntry?.status !== 1) {
-              this.historyService.addHistory(this.doorService, { time: Math.floor(Date.now() / 1000), status: 1 }); // open
-            }
-          }
+          // Log door opened to history service if present\
+          this.addHistory(this.doorService, { status: 1 }, { timegap: 2 });
           this?.log?.debug?.('Door "%s" has stopped moving', this.deviceData.description);
         }
       }
