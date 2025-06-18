@@ -284,7 +284,7 @@ export default class GarageDoor extends HomeKitDevice {
       // Door is fully open
       this.#moveStartedTime = undefined;
       this.#lastDoorStatus = GarageDoor.OPENED;
-      this.message(this.uuid, GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
+      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
     }
 
     if (doorClosed === false && doorOpen === false) {

@@ -2,7 +2,7 @@
     "name": "garagedoor-accfactory",
     "displayName": "GarageDoor Accfactory",
     "type": "module",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "HomeKit garage door opener system using HAP-NodeJS library",
     "author": "n0rt0nthec4t",
     "license": "Apache-2.0",
