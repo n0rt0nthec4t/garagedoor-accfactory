@@ -2,6 +2,10 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.3 (2025/06/21)
+
+- Improved door movement detection when fully opened/closed via physical control
+
 ## v0.1.2 (2025/06/18)
 
 - Updated to use new history functions in `HomeKitDevice` module
