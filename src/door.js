@@ -6,7 +6,7 @@
 import GPIO from 'rpio';
 
 // Define nodejs module requirements
-import { setTimeout } from 'node:timers';
+import { setTimeout, setInterval } from 'node:timers';
 
 // Import our modules
 import HomeKitDevice from './HomeKitDevice.js';
@@ -17,7 +17,7 @@ const DOOR_STATUS_INTERVAL = 1000;
 
 export default class GarageDoor extends HomeKitDevice {
   static TYPE = 'GarageDoor';
-  static VERSION = '2025.06.21'; // Code version
+  static VERSION = '2025.06.22'; // Code version
 
   static DOOR_EVENT = 'DOOREVENT'; // Door status event tag
 
@@ -31,6 +31,7 @@ export default class GarageDoor extends HomeKitDevice {
   static STOPPED = 'stopped';
   static MOVING = 'moving';
   static OBSTRUCTION = 'obstruction';
+  static CLEAR = 'clear';
   static UNKNOWN = 'unknown';
   static FAULT = 'fault';
 
@@ -42,15 +43,17 @@ export default class GarageDoor extends HomeKitDevice {
   currentDoorStatus = undefined;
 
   // Internal data only for this class
+  #lastMovementDirection = undefined; // Track last inferred direction (OPENING or CLOSING)
   #lastDoorStatus = undefined;
+  #lastObstructionStatus = undefined;
   #moveStartedTime = undefined;
+  #doorStatusTimer = undefined;
 
   constructor(accessory, api, log, deviceData) {
     super(accessory, api, log, deviceData);
 
     // Init the GPIO (rpio) library. This only needs to be done once before using library functions
-    GPIO.init({ gpiomem: true });
-    GPIO.init({ mapping: 'gpio' });
+    GPIO.init({ gpiomem: true, mapping: 'gpio' });
 
     this.currentDoorStatus = GarageDoor.STOPPED;
     this.#lastDoorStatus = GarageDoor.UNKNOWN;
@@ -61,11 +64,6 @@ export default class GarageDoor extends HomeKitDevice {
     // Setup the garagedoor service if not already present on the accessory
     this.doorService = this.addHKService(this.hap.Service.GarageDoorOpener, '', 1);
     this.doorService.setPrimaryService();
-    this.addHKCharacteristic(this.doorService, this.hap.Characteristic.StatusFault);
-
-    // Setup intial characteristic values
-    this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
-    this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.STOPPED);
 
     // Setup GPIO pins
     if (this.#validGPIOPin(this.deviceData?.pushButton) === false) {
@@ -96,7 +94,6 @@ export default class GarageDoor extends HomeKitDevice {
 
     if (this.#validGPIOPin(this.deviceData?.obstructionSensor) === true) {
       // Door obstruction sensor
-      this.addHKCharacteristic(this.doorService, this.hap.Characteristic.ObstructionDetected);
       GPIO.open(this.deviceData.obstructionSensor, GPIO.INPUT, GPIO.PULL_DOWN);
       this.postSetupDetail('Obstruction sensor');
       this?.log?.debug?.(
@@ -104,69 +101,123 @@ export default class GarageDoor extends HomeKitDevice {
         this.deviceData.description,
         this.deviceData.obstructionSensor,
       );
+
+      this.addHKCharacteristic(this.doorService, this.hap.Characteristic.ObstructionDetected, {
+        initialValue: this.hasObstruction() === true,
+      });
     }
 
-    // Setup callbacks for characteristics
+    let initial = GarageDoor.STOPPED;
+
+    // Infer physical initial state
+    if (this.isClosed() === true) {
+      initial = GarageDoor.CLOSED;
+      this.#lastMovementDirection = GarageDoor.OPENING;
+      this.postSetupDetail('Door is closed');
+    }
+
+    if (this.isClosed() !== true && this.isOpen() === true) {
+      initial = GarageDoor.OPENED;
+      this.#lastMovementDirection = GarageDoor.CLOSING;
+      this.postSetupDetail('Door is open');
+    }
+
+    if (initial === GarageDoor.STOPPED) {
+      this.#lastMovementDirection = GarageDoor.OPENING;
+      this.postSetupDetail('Door is between opened/closed');
+    }
+
+    this.currentDoorStatus = initial;
+    this.#lastDoorStatus = initial;
+
+    // Setup characteristics
+    this.addHKCharacteristic(this.doorService, this.hap.Characteristic.CurrentDoorState, {
+      initialValue: this.hap.Characteristic.CurrentDoorState[initial.toUpperCase()],
+      onGet: () => {
+        let key = (this.getDoorPosition() || 'stopped').toUpperCase();
+        return this.hap.Characteristic.CurrentDoorState[key] !== undefined
+          ? this.hap.Characteristic.CurrentDoorState[key]
+          : this.hap.Characteristic.CurrentDoorState.STOPPED;
+      },
+    });
+
     this.addHKCharacteristic(this.doorService, this.hap.Characteristic.TargetDoorState, {
+      initialValue:
+        initial === GarageDoor.OPENED ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED,
       onSet: (value) => {
         this.setDoorPosition(value);
       },
     });
-    this.addHKCharacteristic(this.doorService, this.hap.Characteristic.CurrentDoorState, {
-      onGet: () => {
-        let status = this.getDoorPosition();
-        // Convert our internal string status into the HomeKit number value
-        return this.hap.Characteristic.CurrentDoorState[status.toUpperCase()];
-      },
+
+    this.addHKCharacteristic(this.doorService, this.hap.Characteristic.StatusFault, {
+      initialValue: this.hap.Characteristic.StatusFault.NO_FAULT,
     });
 
     // Setup linkage to EveHome app if configured todo so
     this.setupEveHomeLink(this.doorService);
+
+    // Push initial state to HomeKit to prevent stale status
+    this.message(GarageDoor.DOOR_EVENT, { status: this.currentDoorStatus });
+
+    // Kick off polling loop
+    this.#pollDoorStatus();
+    this.#doorStatusTimer = setInterval(() => {
+      this.#pollDoorStatus();
+    }, DOOR_STATUS_INTERVAL);
   }
 
-  setDoorPosition(value) {
-    // Set position of the door. (will either be open or closed)
-    if ((value === this.hap.Characteristic.TargetDoorState.CLOSED || value === GarageDoor.CLOSE) && this.isClosed() === false) {
-      if (this.currentDoorStatus === GarageDoor.OPENING) {
-        // Since door is "moving", press button to stop. Second press below will close ie: reverse
-        this.pressButton();
-        this.currentDoorStatus = GarageDoor.STOPPED;
-        this.#lastDoorStatus = GarageDoor.OPENING;
-      }
-      // "Press" garage opener/closer button, and update HomeKit status to show door moving.
-      // the poll function will update to the closed status when sensor triggered
-      this.pressButton();
+  setDoorPosition(position) {
+    let target = position === this.hap.Characteristic.TargetDoorState.OPEN ? GarageDoor.OPEN : GarageDoor.CLOSE;
+
+    if (this.currentDoorStatus === target) {
+      this?.log?.debug?.('Door "%s" already %s', this.deviceData.description, target);
+      return;
     }
-    if ((value === this.hap.Characteristic.TargetDoorState.OPEN || value === GarageDoor.OPEN) && this.isOpen() === false) {
-      if (this.currentDoorStatus === GarageDoor.CLOSING) {
-        // Since door is "moving", press button to stop. Second press below will close ie: reverse
-        this.pressButton();
-        this.currentDoorStatus = GarageDoor.STOPPED;
-        this.#lastDoorStatus = GarageDoor.CLOSING;
+
+    let behavior = typeof this.deviceData?.buttonBehavior === 'string' ? this.deviceData.buttonBehavior : 'stop-then-reverse';
+
+    let isReversal =
+      (this.currentDoorStatus === GarageDoor.OPENING && target === GarageDoor.CLOSE) ||
+      (this.currentDoorStatus === GarageDoor.CLOSING && target === GarageDoor.OPEN);
+
+    if (isReversal) {
+      this?.log?.info?.('Reversing door "%s" from %s to %s', this.deviceData.description, this.currentDoorStatus, target);
+
+      this.#lastMovementDirection = target;
+      this.#lastDoorStatus = target === GarageDoor.OPEN ? GarageDoor.CLOSED : GarageDoor.OPENED;
+
+      if (behavior === 'auto-reverse' || behavior === 'always-toggle') {
+        this.pressButton(1);
+      } else {
+        this.pressButton(2); // stop, then reverse
       }
-      // "Press" garage opener/closer button, and update HomeKit status to show door moving.
-      // the poll function will update to the open status when sensor triggered
-      this.pressButton();
+      return;
     }
+
+    // Normal operation
+    this.pressButton();
   }
 
   getDoorPosition() {
     return this.currentDoorStatus;
   }
 
-  pressButton() {
-    if (this.#validGPIOPin(this.deviceData?.pushButton) === false) {
+  async pressButton(times = 1) {
+    if (this.#validGPIOPin(this.deviceData?.pushButton) !== true) {
       return;
     }
 
-    // Simulate pressing the controller button
-    // Write high out first to trigger relay, then wait defined millisecond period and put back to low to untrigger
-    GPIO.write(this.deviceData.pushButton, GPIO.HIGH);
-    GPIO.msleep(PUSHBUTTON_DELAY);
-    GPIO.write(this.deviceData.pushButton, GPIO.LOW);
-    GPIO.msleep(PUSHBUTTON_DELAY);
+    for (let i = 0; i < times; i++) {
+      GPIO.write(this.deviceData.pushButton, GPIO.HIGH);
+      await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
+      GPIO.write(this.deviceData.pushButton, GPIO.LOW);
 
-    this?.log?.debug?.('Button pressed for Door "%s"', this.deviceData.description);
+      if (i + 1 < times) {
+        await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
+      }
+    }
+
+    this?.log?.debug?.('Button pressed %d time(s) for Door "%s"', times, this.deviceData.description);
   }
 
   isOpen() {
@@ -197,169 +248,185 @@ export default class GarageDoor extends HomeKitDevice {
 
   onMessage(type, message) {
     if (type === GarageDoor.DOOR_EVENT && typeof message?.status === 'string') {
-      if (message.status === GarageDoor.CLOSED) {
-        // Closed
+      const state = message.status;
+
+      if (state === GarageDoor.CLOSED) {
         this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
         this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.CLOSED);
-        this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.CLOSED);
+        this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.TargetDoorState.CLOSED);
 
-        // Log door closed to history service if present
         if (this.currentDoorStatus !== GarageDoor.CLOSED) {
           this.currentDoorStatus = GarageDoor.CLOSED;
           this.addHistory(this.doorService, { status: 0 }, { timegap: 2 });
           this?.log?.success?.('Door "%s" is closed', this.deviceData.description);
         }
+        return;
       }
 
-      if (message.status === GarageDoor.OPENED) {
-        // Open
+      if (state === GarageDoor.OPENED) {
         this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
         this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.OPEN);
-        this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.OPEN);
+        this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.TargetDoorState.OPEN);
 
-        // Log door opened to history service if present
         if (this.currentDoorStatus !== GarageDoor.OPENED) {
           this.currentDoorStatus = GarageDoor.OPENED;
           this.addHistory(this.doorService, { status: 1 }, { timegap: 2 });
           this?.log?.warn?.('Door "%s" is open', this.deviceData.description);
         }
+        return;
       }
 
       if (message.status === GarageDoor.MOVING) {
-        // Moving
-        this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
-
-        if (message.last === GarageDoor.CLOSED && this.currentDoorStatus !== GarageDoor.OPENING) {
-          // Since door was last closed, and now its moving, assume its opening
-          this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.OPENING);
-          this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.OPEN);
-          this.currentDoorStatus = GarageDoor.OPENING;
-          this?.log?.debug?.('Door "%s" is opening', this.deviceData.description);
+        let direction = message.direction;
+        if (direction !== GarageDoor.OPENING && direction !== GarageDoor.CLOSING) {
+          direction = GarageDoor.CLOSING;
         }
 
-        if (message.last === GarageDoor.OPENED && this.currentDoorStatus !== GarageDoor.CLOSING) {
-          // Since door was last open, and now its moving, assume its closing
-          this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.CLOSING);
-          this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.CLOSED);
-          this.currentDoorStatus = GarageDoor.CLOSING;
-          this?.log?.debug?.('Door "%s" is closing', this.deviceData.description);
+        if (this.currentDoorStatus !== direction) {
+          this.currentDoorStatus = direction;
+          this.#lastMovementDirection = direction;
+
+          this.doorService.updateCharacteristic(
+            this.hap.Characteristic.CurrentDoorState,
+            this.hap.Characteristic.CurrentDoorState[direction.toUpperCase()],
+          );
+
+          this.doorService.updateCharacteristic(
+            this.hap.Characteristic.TargetDoorState,
+            this.hap.Characteristic.TargetDoorState[direction.toUpperCase() === 'OPENING' ? 'OPEN' : 'CLOSED'],
+          );
+
+          this?.log?.debug?.('Door "%s" is %s', this.deviceData.description, direction);
         }
+        return;
       }
 
-      if (message.status === GarageDoor.STOPPED) {
-        // Stopped
+      if (state === GarageDoor.STOPPED) {
         this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.NO_FAULT);
         this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.STOPPED);
-        this.doorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.hap.Characteristic.CurrentDoorState.OPEN);
 
-        // Log door opened to history service if present
         if (this.currentDoorStatus !== GarageDoor.STOPPED) {
           this.currentDoorStatus = GarageDoor.STOPPED;
           this.addHistory(this.doorService, { status: 1 }, { timegap: 2 });
           this?.log?.debug?.('Door "%s" has stopped moving', this.deviceData.description);
         }
+        return;
       }
 
-      if (message.status === GarageDoor.FAULT) {
-        // Faulty sensors
+      if (state === GarageDoor.FAULT) {
         this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.GENERAL_FAULT);
         this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.STOPPED);
-        // What should current door status be???
         this?.log?.error?.('Door "%s" is reporting fault with sensors', this.deviceData.description);
+        return;
       }
 
-      if (message.status === GarageDoor.OBSTRUCTION || message.status === 'clear') {
-        // Door obstruction, either active or cleared
-        this.doorService.updateCharacteristic(
-          this.hap.Characteristic.ObstructionDetected,
-          message.status === GarageDoor.OBSTRUCTION ? true : false,
-        );
-        this?.log?.warn?.('Door "%s" is reporting an obstruction', this.deviceData.description);
-        // <---- Implement. Do we stop door from being closed if obstructed? or just allow to open?? or not allow movement at all?
+      if (state === GarageDoor.OBSTRUCTION) {
+        this.doorService.updateCharacteristic(this.hap.Characteristic.ObstructionDetected, true);
+
+        if (this.#lastObstructionStatus === false) {
+          this?.log?.warn?.('Door "%s" is reporting an obstruction', this.deviceData.description);
+        }
+
+        this.#lastObstructionStatus = true;
+        return;
+      }
+
+      if (state === GarageDoor.CLEAR) {
+        this.doorService.updateCharacteristic(this.hap.Characteristic.ObstructionDetected, false);
+
+        if (this.#lastObstructionStatus === true) {
+          this?.log?.success?.('Door "%s" obstruction cleared', this.deviceData.description);
+        }
+
+        this.#lastObstructionStatus = false;
+        return;
       }
     }
   }
 
-  onUpdate() {
-    let doorOpen = this.isOpen();
-    let doorClosed = this.isClosed();
-    let obstruction = this.hasObstruction();
+  #pollDoorStatus() {
+    // Check obstruction if canfigured up front sensor if defined
+    if (this.#validGPIOPin(this.deviceData?.obstructionSensor) === true) {
+      let obstructed = this.hasObstruction() === true;
+      this.message(GarageDoor.DOOR_EVENT, {
+        status: obstructed ? GarageDoor.OBSTRUCTION : GarageDoor.CLEAR,
+      });
+    }
 
-    // Work out the current status of the door using configured sensors.
-    // This will either be "open", "closed", "moving", "stopped"
-    // We'll send a message about its status once determined
+    let doorClosed = this.isClosed() === true;
+    let doorOpen = this.isOpen() === true;
+
+    // Door is fully closed
     if (doorClosed === true && doorOpen === false) {
-      // Door is fully closed
-      this.#moveStartedTime = undefined;
-      this.#lastDoorStatus = GarageDoor.CLOSED;
-      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
+      if (this.currentDoorStatus !== GarageDoor.CLOSED) {
+        this.#lastDoorStatus = GarageDoor.CLOSED;
+        this.#lastMovementDirection = GarageDoor.OPENING;
+        this.#moveStartedTime = undefined;
+        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
+      }
+      return;
     }
 
-    if (doorClosed === false && doorOpen === true) {
-      // Door is fully open
-      this.#moveStartedTime = undefined;
+    // Door is fully open
+    if (doorOpen === true && doorClosed === false) {
+      if (this.currentDoorStatus !== GarageDoor.OPENED) {
+        this.#lastDoorStatus = GarageDoor.OPENED;
+        this.#lastMovementDirection = GarageDoor.CLOSING;
+        this.#moveStartedTime = undefined;
+        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
+      }
+      return;
+    }
+
+    // Door is moving (neither sensor triggered)
+    if (this.#moveStartedTime === undefined) {
+      this.#moveStartedTime = Date.now();
+    }
+
+    let duration = Date.now() - this.#moveStartedTime;
+    let direction = GarageDoor.CLOSING;
+
+    // Infer movement direction by *previous physical state*
+    if (this.#lastDoorStatus === GarageDoor.CLOSED) {
+      direction = GarageDoor.OPENING;
+    } else if (this.#lastDoorStatus === GarageDoor.OPENED) {
+      direction = GarageDoor.CLOSING;
+    } else if (this.#lastMovementDirection === GarageDoor.OPENING) {
+      direction = GarageDoor.OPENING;
+    }
+
+    // Timeout fallback if sensor fails to confirm status
+    if (direction === GarageDoor.OPENING && this.isOpen() !== true && duration >= this.deviceData.openTime * 1000) {
       this.#lastDoorStatus = GarageDoor.OPENED;
+      this.#lastMovementDirection = GarageDoor.CLOSING;
+      this.#moveStartedTime = undefined;
+      this?.log?.warn?.(
+        'Door "%s" assumed open after %ds (open sensor not triggered)',
+        this.deviceData.description,
+        this.deviceData.openTime,
+      );
       this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
+      return;
     }
 
-    if (doorClosed === false && doorOpen === false) {
-      // Door is neither open or closed, so door is either moving or stopped.
-      if (this.#moveStartedTime === undefined) {
-        this.#moveStartedTime = Date.now(); // Time we detected first movement from either open or closed
-
-        if (this.#lastDoorStatus === GarageDoor.STOPPED) {
-          // Detected movement after stopped state, ie: we've pressed the push button
-          // Stopped state is assumed to be door open, as neither detected open or closed
-          this.#lastDoorStatus = this.currentDoorStatus;
-        }
-      }
-
-      // Reset timer if direction reversed during movement
-      if (
-        (this.#lastDoorStatus === GarageDoor.OPENING && this.currentDoorStatus === GarageDoor.CLOSING) ||
-        (this.#lastDoorStatus === GarageDoor.CLOSING && this.currentDoorStatus === GarageDoor.OPENING)
-      ) {
-        this.#moveStartedTime = Date.now();
-        this.#lastDoorStatus = this.currentDoorStatus;
-      }
-
-      let duration = Math.max(Date.now() - (this.#moveStartedTime !== undefined ? this.#moveStartedTime : 0), 0);
-      if (
-        duration > 2000 && // Add grace period before assuming door has stopped
-        (this.#lastDoorStatus === GarageDoor.UNKNOWN ||
-          this.#lastDoorStatus === GarageDoor.STOPPED ||
-          (this.#lastDoorStatus === GarageDoor.OPENED && duration > this.deviceData.closeTime * 1000) ||
-          (this.#lastDoorStatus === GarageDoor.CLOSED && duration > this.deviceData.openTime * 1000))
-      ) {
-        // Since the door state isn't open or closed OR open or closed status and moving time has been exceeded for configured times
-        // In this case we'll assume door has stopped
-        this.#lastDoorStatus = GarageDoor.STOPPED;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.STOPPED });
-      } else {
-        this.message(GarageDoor.DOOR_EVENT, {
-          status: GarageDoor.MOVING,
-          last: this.#lastDoorStatus,
-          duration: duration,
-        });
-      }
+    if (direction === GarageDoor.CLOSING && this.isClosed() !== true && duration >= this.deviceData.closeTime * 1000) {
+      this.#lastDoorStatus = GarageDoor.CLOSED;
+      this.#lastMovementDirection = GarageDoor.OPENING;
+      this.#moveStartedTime = undefined;
+      this?.log?.warn?.(
+        'Door "%s" assumed closed after %ds (closed sensor not triggered)',
+        this.deviceData.description,
+        this.deviceData.closeTime,
+      );
+      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
+      return;
     }
 
-    if ((doorClosed === true && doorOpen === true) || doorClosed === undefined || doorOpen === undefined) {
-      // Is reading both open and close OR no status, we'll assume fault with sensors
-      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.FAULT, last: this.#lastDoorStatus });
-    }
-
-    if (obstruction !== undefined) {
-      // Since obstruction didn't return an undefined value, this means we have a configured obstruction sensor and its returned its status
-      this.message(GarageDoor.DOOR_EVENT, { status: obstruction === true ? GarageDoor.OBSTRUCTION : 'clear' });
-    }
-
-    // Perform this again after a short period by issuing an device update message
-    // The onUpdate function will only be called again from this message if some data has changed
-    // We can force this by adding a "timestamp" field to the data object
-    setTimeout(() => {
-      this.message(HomeKitDevice.UPDATE, { lastDoorCheckTime: Date.now() });
-    }, DOOR_STATUS_INTERVAL);
+    this.message(GarageDoor.DOOR_EVENT, {
+      status: GarageDoor.MOVING,
+      direction: direction,
+      duration: duration,
+    });
   }
 
   #validGPIOPin(pin) {

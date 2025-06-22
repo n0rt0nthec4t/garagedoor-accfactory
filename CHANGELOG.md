@@ -2,6 +2,13 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.4 (2025/06/21)
+
+- More accurate door status detection when using the physical button
+- Reversing the door direction (e.g. from opening to closing) now works reliably
+- HomeKit always shows the correct door state, even during mid-motion changes
+- Improved button handling so the system knows when and how often to press, no extra delay logic needed outside
+
 ## v0.1.3 (2025/06/21)
 
 - Improved door movement detection when fully opened/closed via physical control

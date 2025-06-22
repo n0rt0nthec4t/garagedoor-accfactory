@@ -17,7 +17,7 @@
 // todo
 // -- Get obstruction code working and verifed
 //
-// Code Version 2025/06/18
+// Code Version 2025/06/21
 // Mark Hulskamp
 'use strict';
 
@@ -125,6 +125,11 @@ function loadConfiguration(filename) {
             openTime: isNaN(door?.openTime) === false && Number(door.openTime) >= 0 && Number(door.openTime) <= 300 ? door.openTime : 30,
             closeTime:
               isNaN(door?.closeTime) === false && Number(door.closeTime) >= 0 && Number(door.closeTime) <= 300 ? door.closeTime : 30,
+            buttonBehavior:
+              typeof door?.buttonBehavior === 'string' &&
+              ['stop-then-reverse', 'auto-reverse', 'always-toggle'].includes(door.buttonBehavior)
+                ? door.buttonBehavior
+                : 'stop-then-reverse',
           };
 
           config.doors.push(tempDoor);
@@ -243,6 +248,7 @@ config.doors.forEach((door) => {
     obstructionSensor: door.obstructionSensor,
     openTime: door.openTime,
     closeTime: door.closeTime,
+    buttonBehavior: door.buttonBehavior,
   };
   let tempDevice = new GarageDoor(undefined, HAP, log, deviceData);
   tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
