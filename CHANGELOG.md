@@ -2,6 +2,11 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.5 (2025/10/18)
+
+- Fixed door open/close logic if already in the requested state
+- Updated dependancies
+
 ## v0.1.4 (2025/06/21)
 
 - More accurate door status detection when using the physical button
