@@ -4,3 +4,6 @@
 [submodule "src/HomeKitDevice"]
 	path = src/HomeKitDevice
 	url = https://github.com/n0rt0nthec4t/HomeKitDevice.git
+[submodule "src/HomeKitUI"]
+	path = src/HomeKitUI
+	url = https://github.com/n0rt0nthec4t/HomeKitUI
