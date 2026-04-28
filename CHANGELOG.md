@@ -2,6 +2,16 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.7 (2026/04/28)
+
+- Added schema-driven configuration UI with dynamic form rendering
+- General UI/UX improvements
+
+## v0.1.6 (2026/03/05)
+
+- General code cleanup and stability improvements
+- Refactored `GarageDoor` to use updated `HomeKitDevice` module
+
 ## v0.1.5 (2025/10/18)
 
 - Fixed door open/close logic if already in the requested state

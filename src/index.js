@@ -1,23 +1,45 @@
-// HAP-Nodejs Garage Door opener accessory
+// Garage Door Accessory (HAP-NodeJS)
+// Part of garagedoor-accfactory
 //
-// https://shop.pimoroni.com/products/automation-phat
+// Provides standalone HomeKit garage door accessories using HAP-NodeJS.
+// Supports multiple doors, GPIO-based control/sensing, optional Eve history,
+// and a schema-driven Web UI for configuration and monitoring.
 //
-// GPIO Pin Assignments for pHAT board
-// ------------------------------------
-// GPIO26	Input 1
-// GPIO20	Input 2
-// GPIO21	Input 3
-// GPIO5	Output 1
-// GPIO12	Output 2
-// GPIO6	Output 3
-// GPIO16	Relay 1
+// Features:
+// - Multiple garage doors via `doors[]` configuration
+// - GPIO-based push button, open/closed sensors, optional obstruction sensor
+// - Configurable timing and button behaviour
+// - HomeKit pairing per door (unique username per accessory)
+// - Optional EveHome history integration
+// - Built-in Web UI (HomeKitUI) with schema-driven dynamic configuration
+// - Live log streaming and status monitoring
 //
-// Usage: node dist/index.js [optional-config.json]
+// Configuration:
+// - JSON-based configuration file (default: GarageDoor.json)
+// - Schema-driven UI (config.schema.json)
+// - Supports runtime editing via Web UI (restart required for structural changes)
 //
-// todo
-// -- Get obstruction code working and verifed
+// Usage:
+//   node dist/index.js [optional-config.json]
 //
-// Code Version 2025/06/21
+// Notes:
+// - GPIO pin ranges are validated per device (see GarageDoor.MIN/MAX_GPIO_PIN)
+// - Changes to doors (add/remove) require restart to take effect
+// - Web UI is optional and enabled via options.webUIPort
+//
+// Example Hardware:
+// - Pimoroni Automation pHAT
+//   https://shop.pimoroni.com/products/automation-phat
+//   Example GPIO mapping:
+//     GPIO26  Input 1
+//     GPIO20  Input 2
+//     GPIO21  Input 3
+//     GPIO5   Output 1
+//     GPIO12  Output 2
+//     GPIO6   Output 3
+//     GPIO16  Relay 1
+//
+// Code Version 2026.04.28
 // Mark Hulskamp
 'use strict';
 
@@ -43,6 +65,8 @@ HomeKitDevice.PLATFORM_NAME = 'GarageDoorAccfactory';
 import HomeKitHistory from './HomeKitHistory.js';
 HomeKitDevice.HISTORY = HomeKitHistory;
 
+import HomeKitUI from './HomeKitUI.js';
+
 import Logger from './logger.js';
 const log = Logger.withPrefix(HomeKitDevice.PLATFORM_NAME);
 
@@ -51,6 +75,7 @@ const { version } = createRequire(import.meta.url)('../package.json'); // Import
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // Make a defined for JS __dirname
 const ACCESSORY_PINCODE = '031-45-154'; // Default HomeKit pairing code
 const CONFIGURATION_FILE = 'GarageDoor.json'; // Default configuration file name
+const CONFIG_SCHEMA_FILE = path.join(__dirname, './config.schema.json');
 
 // General helper functions
 function loadConfiguration(filename) {
@@ -99,32 +124,37 @@ function loadConfiguration(filename) {
                 ? door.serialNumber.trim()
                 : crc32(crypto.randomUUID().toUpperCase()).toString(),
             pushButton:
-              isNaN(door?.pushButton) === false &&
+              Number.isFinite(Number(door?.pushButton)) === true &&
               Number(door.pushButton) >= GarageDoor.MIN_GPIO_PIN &&
               Number(door.pushButton) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.pushButton)
                 : undefined,
             closedSensor:
-              isNaN(door?.closedSensor) === false &&
+              Number.isFinite(Number(door?.closedSensor)) === true &&
               Number(door.closedSensor) >= GarageDoor.MIN_GPIO_PIN &&
               Number(door.closedSensor) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.closedSensor)
                 : undefined,
             openSensor:
-              isNaN(door?.openSensor) === false &&
+              Number.isFinite(Number(door?.openSensor)) === true &&
               Number(door.openSensor) >= GarageDoor.MIN_GPIO_PIN &&
               Number(door.openSensor) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.openSensor)
                 : undefined,
             obstructionSensor:
-              isNaN(door?.obstructionSensor) === false &&
+              Number.isFinite(Number(door?.obstructionSensor)) === true &&
               Number(door.obstructionSensor) >= GarageDoor.MIN_GPIO_PIN &&
               Number(door.obstructionSensor) <= GarageDoor.MAX_GPIO_PIN
                 ? Number(door.obstructionSensor)
                 : undefined,
-            openTime: isNaN(door?.openTime) === false && Number(door.openTime) >= 0 && Number(door.openTime) <= 300 ? door.openTime : 30,
+            openTime:
+              Number.isFinite(Number(door?.openTime)) === true && Number(door.openTime) >= 0 && Number(door.openTime) <= 300
+                ? Number(door.openTime)
+                : 30,
             closeTime:
-              isNaN(door?.closeTime) === false && Number(door.closeTime) >= 0 && Number(door.closeTime) <= 300 ? door.closeTime : 30,
+              Number.isFinite(Number(door?.closeTime)) === true && Number(door.closeTime) >= 0 && Number(door.closeTime) <= 300
+                ? Number(door.closeTime)
+                : 30,
             buttonBehavior:
               typeof door?.buttonBehavior === 'string' &&
               ['stop-then-reverse', 'auto-reverse', 'always-toggle'].includes(door.buttonBehavior)
@@ -142,11 +172,15 @@ function loadConfiguration(filename) {
           HomeKitDevice.HK_PIN_3_2_3.test(value?.hkPairingCode) === true || HomeKitDevice.HK_PIN_4_4.test(value?.hkPairingCode) === true
             ? value.hkPairingCode
             : ACCESSORY_PINCODE;
+        config.options.webUIPort =
+          Number.isFinite(Number(value?.webUIPort)) === true && Number(value.webUIPort) > 0 && Number(value.webUIPort) <= 65535
+            ? Number(value.webUIPort)
+            : 0;
       }
     });
 
     // Write config backout!!
-    fs.writeFileSync(filename, JSON.stringify(config, null, 3));
+    fs.writeFileSync(filename, JSON.stringify(config, null, 2) + '\n');
 
     // eslint-disable-next-line no-unused-vars
   } catch (error) {
@@ -232,7 +266,9 @@ if (config?.options?.debug === true) {
 }
 
 // For each door in our configuration, create the HomeKit accessory
-config.doors.forEach((door) => {
+let accessories = [];
+
+for (let door of config.doors) {
   let deviceData = {
     hkPairingCode: config.options.hkPairingCode,
     hkUsername: door.hkUsername,
@@ -250,6 +286,70 @@ config.doors.forEach((door) => {
     closeTime: door.closeTime,
     buttonBehavior: door.buttonBehavior,
   };
+
   let tempDevice = new GarageDoor(undefined, HAP, log, deviceData);
-  tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
+  let accessory = await tempDevice.add(door.name, HAP.Categories.GARAGE_DOOR_OPENER, true);
+
+  accessories.push(accessory);
+}
+
+// Start HomeKit Web UI if configured to do so
+let ui = undefined;
+if (config.options.webUIPort > 0) {
+  ui = new HomeKitUI({
+    name: 'Garage Door',
+    version,
+    port: config.options.webUIPort,
+    configFile: configurationFile,
+    schemaFile: CONFIG_SCHEMA_FILE,
+    accessories,
+    hap: HAP,
+    log,
+    logger: Logger,
+    pages: [
+      {
+        id: 'doors',
+        title: 'Garage Doors',
+        svg:
+          '<svg viewBox="0 0 24 24">' +
+          '<path d="M3 11.5 12 4l9 7.5"/>' + // roof
+          '<path d="M5 10.5V21h14V10.5"/>' + // frame
+          '<path d="M8 14h8"/>' + // door line 1
+          '<path d="M8 17h8"/>' + // door line 2
+          '</svg>',
+        schemaPath: 'doors',
+      },
+      {
+        id: 'options',
+        title: 'Options',
+        icon: 'settings',
+        schemaPath: 'options',
+      },
+    ],
+    onRestart: async () => {
+      process.exit(0);
+    },
+  });
+
+  await ui.start();
+}
+
+// Handle process shutdown
+async function shutdown(signal) {
+  log.warn('Received %s, shutting down gracefully...', signal);
+
+  if (ui !== undefined) {
+    await ui.stop();
+  }
+
+  process.exit(0);
+}
+
+// Register process signal handlers for graceful shutdown
+process.once('SIGTERM', () => {
+  shutdown('SIGTERM');
+});
+
+process.once('SIGINT', () => {
+  shutdown('SIGINT');
 });

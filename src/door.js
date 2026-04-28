@@ -6,7 +6,7 @@
 import GPIO from 'rpio';
 
 // Define nodejs module requirements
-import { setTimeout, setInterval } from 'node:timers';
+import { setTimeout } from 'node:timers';
 
 // Import our modules
 import HomeKitDevice from './HomeKitDevice.js';
@@ -17,9 +17,10 @@ const DOOR_STATUS_INTERVAL = 1000;
 
 export default class GarageDoor extends HomeKitDevice {
   static TYPE = 'GarageDoor';
-  static VERSION = '2025.10.18'; // Code version
+  static VERSION = '2026.03.05'; // Code version
 
-  static DOOR_EVENT = 'DOOREVENT'; // Door status event tag
+  static DOOR_EVENT = 'door-event'; // Door status event tag
+  static TIMER_DOOR_STATUS_POLL = 'door-status-poll'; // Timer handle for door status polling
 
   // Define door states
   static OPEN = 'open';
@@ -47,7 +48,6 @@ export default class GarageDoor extends HomeKitDevice {
   #lastDoorStatus = undefined;
   #lastObstructionStatus = undefined;
   #moveStartedTime = undefined;
-  #doorStatusTimer = undefined;
 
   constructor(accessory, api, log, deviceData) {
     super(accessory, api, log, deviceData);
@@ -68,39 +68,59 @@ export default class GarageDoor extends HomeKitDevice {
     // Setup GPIO pins
     if (this.#validGPIOPin(this.deviceData?.pushButton) === false) {
       // Invalid pushbutton pin specified
-      this?.log?.warn?.('No valid relay pin specifed for door open/close button on "%s"', this.deviceData.description);
+      this?.log?.warn?.('No valid relay pin specified for door open/close button on "%s"', this.deviceData.description);
       this?.log?.warn?.('We will be unable to operate garage door');
     }
 
     if (this.#validGPIOPin(this.deviceData?.pushButton) === true) {
       // Push button
-      GPIO.open(this.deviceData.pushButton, GPIO.OUTPUT, GPIO.LOW);
-      this?.log?.debug?.('Setup open/close relay on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.pushButton);
+      try {
+        GPIO.open(this.deviceData.pushButton, GPIO.OUTPUT, GPIO.LOW);
+        this?.log?.debug?.('Setup open/close relay on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.pushButton);
+      } catch (error) {
+        this?.log?.error?.('Failed to setup pushButton GPIO pin "%s": %s', this.deviceData.pushButton, String(error));
+      }
     }
 
     if (this.#validGPIOPin(this.deviceData?.closedSensor) === true) {
       // Door closed sensor
-      GPIO.open(this.deviceData.closedSensor, GPIO.INPUT, GPIO.PULL_DOWN);
-      this.postSetupDetail('Door closed sensor');
-      this?.log?.debug?.('Setup closed door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.closedSensor);
+      try {
+        GPIO.open(this.deviceData.closedSensor, GPIO.INPUT, GPIO.PULL_DOWN);
+        this.postSetupDetail('Door closed sensor');
+        this?.log?.debug?.(
+          'Setup closed door sensor on "%s" using GPIO pin "%s"',
+          this.deviceData.description,
+          this.deviceData.closedSensor,
+        );
+      } catch (error) {
+        this?.log?.error?.('Failed to setup closedSensor GPIO pin "%s": %s', this.deviceData.closedSensor, String(error));
+      }
     }
 
     if (this.#validGPIOPin(this.deviceData?.openSensor) === true) {
       // Door open sensor
-      GPIO.open(this.deviceData.openSensor, GPIO.INPUT, GPIO.PULL_DOWN);
-      this.postSetupDetail('Door open sensor');
-      this?.log?.debug?.('Setup open door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.openSensor);
+      try {
+        GPIO.open(this.deviceData.openSensor, GPIO.INPUT, GPIO.PULL_DOWN);
+        this.postSetupDetail('Door open sensor');
+        this?.log?.debug?.('Setup open door sensor on "%s" using GPIO pin "%s"', this.deviceData.description, this.deviceData.openSensor);
+      } catch (error) {
+        this?.log?.error?.('Failed to setup openSensor GPIO pin "%s": %s', this.deviceData.openSensor, String(error));
+      }
     }
 
     if (this.#validGPIOPin(this.deviceData?.obstructionSensor) === true) {
       // Door obstruction sensor
-      GPIO.open(this.deviceData.obstructionSensor, GPIO.INPUT, GPIO.PULL_DOWN);
-      this.postSetupDetail('Obstruction sensor');
-      this?.log?.debug?.(
-        'Setup obstruction sensor on "%s" using GPIO pin "%s"',
-        this.deviceData.description,
-        this.deviceData.obstructionSensor,
-      );
+      try {
+        GPIO.open(this.deviceData.obstructionSensor, GPIO.INPUT, GPIO.PULL_DOWN);
+        this.postSetupDetail('Obstruction sensor');
+        this?.log?.debug?.(
+          'Setup obstruction sensor on "%s" using GPIO pin "%s"',
+          this.deviceData.description,
+          this.deviceData.obstructionSensor,
+        );
+      } catch (error) {
+        this?.log?.error?.('Failed to setup obstructionSensor GPIO pin "%s": %s', this.deviceData.obstructionSensor, String(error));
+      }
 
       this.addHKCharacteristic(this.doorService, this.hap.Characteristic.ObstructionDetected, {
         initialValue: this.hasObstruction() === true,
@@ -132,20 +152,15 @@ export default class GarageDoor extends HomeKitDevice {
 
     // Setup characteristics
     this.addHKCharacteristic(this.doorService, this.hap.Characteristic.CurrentDoorState, {
-      initialValue: this.hap.Characteristic.CurrentDoorState[initial.toUpperCase()],
-      onGet: () => {
-        let key = (this.getDoorPosition() || 'stopped').toUpperCase();
-        return this.hap.Characteristic.CurrentDoorState[key] !== undefined
-          ? this.hap.Characteristic.CurrentDoorState[key]
-          : this.hap.Characteristic.CurrentDoorState.STOPPED;
-      },
+      initialValue: this.#mapCurrentDoorState(initial),
+      onGet: () => this.#mapCurrentDoorState(this.getDoorPosition()),
     });
 
     this.addHKCharacteristic(this.doorService, this.hap.Characteristic.TargetDoorState, {
       initialValue:
         initial === GarageDoor.OPENED ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED,
-      onSet: (value) => {
-        this.setDoorPosition(value);
+      onSet: async (value) => {
+        await this.setDoorPosition(value);
       },
     });
 
@@ -156,18 +171,18 @@ export default class GarageDoor extends HomeKitDevice {
     // Push initial state to HomeKit to prevent stale status
     this.message(GarageDoor.DOOR_EVENT, { status: this.currentDoorStatus });
 
-    // Kick off polling loop
-    this.#pollDoorStatus();
-    this.#doorStatusTimer = setInterval(() => {
-      this.#pollDoorStatus();
-    }, DOOR_STATUS_INTERVAL);
+    // Start periodic door status polling via parent class timer system
+    this.addTimer(GarageDoor.TIMER_DOOR_STATUS_POLL, {
+      delay: 0,
+      interval: DOOR_STATUS_INTERVAL,
+    });
   }
 
-  setDoorPosition(position) {
+  async setDoorPosition(position) {
     // Map HomeKit target to direction and final state
-    var targetDir = position === this.hap.Characteristic.TargetDoorState.OPEN ? GarageDoor.OPEN : GarageDoor.CLOSE;
-    var targetFinal = targetDir === GarageDoor.OPEN ? GarageDoor.OPENED : GarageDoor.CLOSED;
-    var behavior = typeof this.deviceData?.buttonBehavior === 'string' ? this.deviceData.buttonBehavior : 'stop-then-reverse';
+    let targetDir = position === this.hap.Characteristic.TargetDoorState.OPEN ? GarageDoor.OPEN : GarageDoor.CLOSE;
+    let targetFinal = targetDir === GarageDoor.OPEN ? GarageDoor.OPENED : GarageDoor.CLOSED;
+    let behavior = typeof this.deviceData?.buttonBehavior === 'string' ? this.deviceData.buttonBehavior : 'stop-then-reverse';
 
     // Already fully there, no action needed
     if (this.currentDoorStatus === targetFinal) {
@@ -198,9 +213,9 @@ export default class GarageDoor extends HomeKitDevice {
       this.#lastDoorStatus = targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED;
 
       if (behavior === 'auto-reverse' || behavior === 'always-toggle') {
-        this.pressButton(1); // single press
+        await this.#pressButton(1); // single press
       } else {
-        this.pressButton(2); // stop-then-reverse: explicit double press
+        await this.#pressButton(2); // stop-then-reverse: explicit double press
       }
       return;
     }
@@ -214,7 +229,7 @@ export default class GarageDoor extends HomeKitDevice {
       this.#lastMovementDirection = targetDir;
       this.#lastDoorStatus = targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED;
       this?.log?.debug?.('Starting door "%s" toward %s', this.deviceData.description, targetFinal);
-      this.pressButton(1);
+      await this.#pressButton(1);
       return;
     }
 
@@ -227,36 +242,22 @@ export default class GarageDoor extends HomeKitDevice {
     // Fallback: press once toward desired state
     this.#lastMovementDirection = targetDir;
     this.#lastDoorStatus = targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED;
-    this.pressButton(1);
+    await this.#pressButton(1);
   }
 
   getDoorPosition() {
     return this.currentDoorStatus;
   }
 
-  async pressButton(times = 1) {
-    if (this.#validGPIOPin(this.deviceData?.pushButton) !== true) {
-      return;
-    }
-
-    for (let i = 0; i < times; i++) {
-      GPIO.write(this.deviceData.pushButton, GPIO.HIGH);
-      await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
-      GPIO.write(this.deviceData.pushButton, GPIO.LOW);
-
-      if (i + 1 < times) {
-        await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
-      }
-    }
-
-    this?.log?.debug?.('Button pressed %d time(s) for Door "%s"', times, this.deviceData.description);
-  }
-
   isOpen() {
     let openStatus = undefined;
 
     if (this.#validGPIOPin(this.deviceData?.openSensor) === true) {
-      openStatus = GPIO.read(this.deviceData.openSensor) === GPIO.HIGH ? true : false; // If high on sensor, means door is opened
+      try {
+        openStatus = GPIO.read(this.deviceData.openSensor) === GPIO.HIGH;
+      } catch (error) {
+        this?.log?.warn?.('Error reading openSensor GPIO pin "%s": %s', this.deviceData.openSensor, String(error));
+      }
     }
     return openStatus;
   }
@@ -265,7 +266,11 @@ export default class GarageDoor extends HomeKitDevice {
     let closeStatus = undefined;
 
     if (this.#validGPIOPin(this.deviceData?.closedSensor) === true) {
-      closeStatus = GPIO.read(this.deviceData.closedSensor) === GPIO.HIGH ? true : false; // If high on sensor, means door is closed
+      try {
+        closeStatus = GPIO.read(this.deviceData.closedSensor) === GPIO.HIGH;
+      } catch (error) {
+        this?.log?.warn?.('Error reading closedSensor GPIO pin "%s": %s', this.deviceData.closedSensor, String(error));
+      }
     }
     return closeStatus;
   }
@@ -273,7 +278,11 @@ export default class GarageDoor extends HomeKitDevice {
   hasObstruction() {
     let obstructionStatus = undefined;
     if (this.#validGPIOPin(this.deviceData?.obstructionSensor) === true) {
-      obstructionStatus = GPIO.read(this.deviceData.obstructionSensor) === GPIO.HIGH ? true : false; // If high, obstruction detected
+      try {
+        obstructionStatus = GPIO.read(this.deviceData.obstructionSensor) === GPIO.HIGH;
+      } catch (error) {
+        this?.log?.warn?.('Error reading obstructionSensor GPIO pin "%s": %s', this.deviceData.obstructionSensor, String(error));
+      }
     }
     return obstructionStatus;
   }
@@ -310,24 +319,30 @@ export default class GarageDoor extends HomeKitDevice {
 
       if (message.status === GarageDoor.MOVING) {
         let direction = message.direction;
+
+        // Normalise direction
         if (direction !== GarageDoor.OPENING && direction !== GarageDoor.CLOSING) {
-          direction = GarageDoor.CLOSING;
+          direction = this.#lastMovementDirection;
+        }
+        if (direction !== GarageDoor.OPENING && direction !== GarageDoor.CLOSING) {
+          direction = GarageDoor.CLOSING; // final fallback only if we truly have nothing
         }
 
-        if (this.currentDoorStatus !== direction) {
-          this.currentDoorStatus = direction;
-          this.#lastMovementDirection = direction;
+        // Only log if direction changed
+        let directionChanged = this.currentDoorStatus !== direction;
 
-          this.doorService.updateCharacteristic(
-            this.hap.Characteristic.CurrentDoorState,
-            this.hap.Characteristic.CurrentDoorState[direction.toUpperCase()],
-          );
+        // Even if internal state matches, it's usually worth pushing HK updates to avoid stale UI
+        this.currentDoorStatus = direction;
+        this.#lastMovementDirection = direction;
 
-          this.doorService.updateCharacteristic(
-            this.hap.Characteristic.TargetDoorState,
-            this.hap.Characteristic.TargetDoorState[direction.toUpperCase() === 'OPENING' ? 'OPEN' : 'CLOSED'],
-          );
+        this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.#mapCurrentDoorState(direction));
 
+        this.doorService.updateCharacteristic(
+          this.hap.Characteristic.TargetDoorState,
+          direction === GarageDoor.OPENING ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED,
+        );
+
+        if (directionChanged === true) {
           this?.log?.debug?.('Door "%s" is %s', this.deviceData.description, direction);
         }
         return;
@@ -372,6 +387,48 @@ export default class GarageDoor extends HomeKitDevice {
 
         this.#lastObstructionStatus = false;
         return;
+      }
+    }
+  }
+
+  async onTimer(message) {
+    // Handle timer events dispatched by the parent class timer system
+    if (message?.timer === GarageDoor.TIMER_DOOR_STATUS_POLL) {
+      this.#pollDoorStatus();
+    }
+  }
+
+  async onShutdown() {
+    // Clean up GPIO pins on shutdown
+    if (this.#validGPIOPin(this.deviceData?.pushButton) === true) {
+      try {
+        GPIO.close(this.deviceData.pushButton);
+      } catch (error) {
+        this?.log?.debug?.('Error closing pushButton GPIO pin: %s', String(error));
+      }
+    }
+
+    if (this.#validGPIOPin(this.deviceData?.closedSensor) === true) {
+      try {
+        GPIO.close(this.deviceData.closedSensor);
+      } catch (error) {
+        this?.log?.debug?.('Error closing closedSensor GPIO pin: %s', String(error));
+      }
+    }
+
+    if (this.#validGPIOPin(this.deviceData?.openSensor) === true) {
+      try {
+        GPIO.close(this.deviceData.openSensor);
+      } catch (error) {
+        this?.log?.debug?.('Error closing openSensor GPIO pin: %s', String(error));
+      }
+    }
+
+    if (this.#validGPIOPin(this.deviceData?.obstructionSensor) === true) {
+      try {
+        GPIO.close(this.deviceData.obstructionSensor);
+      } catch (error) {
+        this?.log?.debug?.('Error closing obstructionSensor GPIO pin: %s', String(error));
       }
     }
   }
@@ -504,5 +561,40 @@ export default class GarageDoor extends HomeKitDevice {
 
   #validGPIOPin(pin) {
     return isNaN(pin) === false && Number(pin) >= GarageDoor.MIN_GPIO_PIN && Number(pin) <= GarageDoor.MAX_GPIO_PIN;
+  }
+
+  #mapCurrentDoorState(state) {
+    return state === GarageDoor.OPENED
+      ? this.hap.Characteristic.CurrentDoorState.OPEN
+      : state === GarageDoor.CLOSED
+        ? this.hap.Characteristic.CurrentDoorState.CLOSED
+        : state === GarageDoor.OPENING
+          ? this.hap.Characteristic.CurrentDoorState.OPENING
+          : state === GarageDoor.CLOSING
+            ? this.hap.Characteristic.CurrentDoorState.CLOSING
+            : this.hap.Characteristic.CurrentDoorState.STOPPED;
+  }
+
+  async #pressButton(times = 1) {
+    if (this.#validGPIOPin(this.deviceData?.pushButton) !== true) {
+      return;
+    }
+
+    for (let i = 0; i < times; i++) {
+      try {
+        GPIO.write(this.deviceData.pushButton, GPIO.HIGH);
+        await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
+        GPIO.write(this.deviceData.pushButton, GPIO.LOW);
+      } catch (error) {
+        this?.log?.error?.('Error writing to pushButton GPIO pin "%s": %s', this.deviceData.pushButton, String(error));
+        return;
+      }
+
+      if (i + 1 < times) {
+        await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
+      }
+    }
+
+    this?.log?.debug?.('Button pressed %d time(s) for Door "%s"', times, this.deviceData.description);
   }
 }

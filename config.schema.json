@@ -1,0 +1,108 @@
+{
+  "type": "object",
+  "properties": {
+    "doors": {
+      "type": "array",
+      "title": "Garage Doors",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": "Garage Door"
+          },
+          "manufacturer": {
+            "type": "string",
+            "title": "Manufacturer",
+            "default": "Garage Door"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "default": "Generic"
+          },
+          "pushButton": {
+            "type": "integer",
+            "title": "Push Button GPIO",
+            "minimum": 0,
+            "maximum": 26
+          },
+          "openSensor": {
+            "type": "integer",
+            "title": "Open Sensor GPIO",
+            "minimum": 0,
+            "maximum": 26
+          },
+          "closedSensor": {
+            "type": "integer",
+            "title": "Closed Sensor GPIO",
+            "minimum": 0,
+            "maximum": 26
+          },
+          "obstructionSensor": {
+            "type": "integer",
+            "title": "Obstruction Sensor GPIO",
+            "minimum": 0,
+            "maximum": 26
+          },
+
+          "openTime": {
+            "type": "integer",
+            "title": "Open Time (seconds)",
+            "default": 30,
+            "minimum": 0,
+            "maximum": 300
+          },
+          "closeTime": {
+            "type": "integer",
+            "title": "Close Time (seconds)",
+            "default": 30,
+            "minimum": 0,
+            "maximum": 300
+          },
+
+          "buttonBehavior": {
+            "type": "string",
+            "title": "Button Behaviour",
+            "enum": [
+              "stop-then-reverse",
+              "auto-reverse",
+              "always-toggle"
+            ],
+            "default": "stop-then-reverse"
+          }
+        }
+      }
+    },
+
+    "options": {
+      "type": "object",
+      "title": "Options",
+      "properties": {
+        "debug": {
+          "type": "boolean",
+          "title": "Debug Logging",
+          "default": false
+        },
+        "eveHistory": {
+          "type": "boolean",
+          "title": "Eve History",
+          "default": true
+        },
+        "hkPairingCode": {
+          "type": "string",
+          "title": "HomeKit Pairing Code",
+          "default": "031-45-154"
+        },
+        "webUIPort": {
+          "type": "integer",
+          "title": "Web UI Port",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 0
+        }
+      }
+    }
+  }
+}

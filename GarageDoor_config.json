@@ -1,20 +1,23 @@
 {
-    "doors" : [
-        {
-            "name" : "Garage Door",
-            "manufacturer" : "A Door Company",
-            "model" : "MT-1234",
-            "serialNumber" : "1234567890",
-            "pushButton" : 16,
-            "closedSensor" : 26,
-            "openSensor" : 20,
-            "openTime" : 30,
-            "closeTime" : 30
-        }
-    ],
-    "options": {
-        "debug": false,
-        "eveHistory": true,
-        "hkPairingCode": "031-45-154"
+  "doors": [
+    {
+      "hkUsername": "69:1A:A4:58:51:78",
+      "name": "Garage Door",
+      "manufacturer": "A Door Company",
+      "model": "MT-1234",
+      "serialNumber": "1234567890",
+      "pushButton": 16,
+      "closedSensor": 26,
+      "openSensor": 20,
+      "openTime": 30,
+      "closeTime": 30,
+      "buttonBehavior": "stop-then-reverse"
     }
+  ],
+  "options": {
+    "debug": false,
+    "eveHistory": true,
+    "hkPairingCode": "031-45-154",
+    "webUIPort": 8581
+  }
 }
