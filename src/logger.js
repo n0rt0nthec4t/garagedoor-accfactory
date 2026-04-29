@@ -1,38 +1,34 @@
 // Module: Logger
 //
 // Shared logger for standalone HAP-NodeJS applications.
-// Inspired by the Homebridge logger, but simplified for direct application use.\
+// Inspired by the Homebridge logger, but simplified for direct application use.
 //
 // Taken from https://github.com/homebridge/homebridge/blob/latest/src/logger.ts
-// Converted back to JS for using under HAP-NodeJS library directly
+// Converted back to JS for using under HAP-NodeJS library directly.
 //
-// Provides terminal logging, colour formatting, in-memory history, and live log
-// listeners for web UI streaming.
+// Provides terminal logging and colour formatting only.
 //
 // Responsibilities:
 // - Provide prefixed log functions for each application/module
 // - Format messages using util.format(...) style placeholders
 // - Colour terminal output by log level
-// - Keep recent log history in memory
-// - Notify listeners when new log entries are written
-// - Support HomeKitUI or other consumers without scraping stdout/stderr
+// - Write formatted output to console.log / console.error
 //
 // Notes:
-// - All logger instances share one global history/listener pipeline
 // - Prefixes are instance-specific and used only for formatting
 // - Debug logging is disabled by default
 //
-// Code version 2026.04.27
+// Code version 2026.04.29
 // Mark Hulskamp
 'use strict';
 
 // Define nodejs module requirements
 import console from 'node:console';
+import process from 'node:process';
 import util from 'node:util';
 
 // Define external module requirements
 import chalk from 'chalk';
-import { AnsiUp } from 'ansi_up';
 
 // Define log level constants
 export const LogLevel = {
@@ -46,11 +42,7 @@ export const LogLevel = {
 // Define our logger class
 export default class Logger {
   // Shared logger state
-  static #ansi = new AnsiUp(); // ANSI/chalk output to HTML converter for UI consumers
   static #debugEnabled = false; // Debug logging disabled by default
-  static #history = []; // Recent log history shared by all logger instances
-  static #listeners = new Set(); // Live log listeners used by HomeKitUI or other consumers
-  static #maxHistory = 500; // Maximum log entries retained in memory
   static #timestampEnabled = true; // Timestamp logging enabled by default
 
   static internal = new Logger();
@@ -58,34 +50,29 @@ export default class Logger {
   prefix = undefined;
 
   constructor(prefix = undefined) {
-    // Store an optional prefix for this logger instance. The prefix is only used for
-    // display formatting; all entries still flow into the shared logger pipeline.
+    // Store optional prefix for display formatting only.
     this.prefix = typeof prefix === 'string' && prefix !== '' ? prefix : undefined;
 
-    // Use inline HTML styles for ANSI conversion so the browser does not need to
-    // know the exact chalk/ANSI class mapping.
-    Logger.#ansi.use_classes = false;
+    // Force ANSI when explicitly requested or when running under non-TTY environments such as systemd/journald.
+    if (process.env.FORCE_COLOR !== undefined) {
+      chalk.level =
+        Number.isFinite(Number(process.env.FORCE_COLOR)) && Number(process.env.FORCE_COLOR) > 0 ? Number(process.env.FORCE_COLOR) : 1;
+    } else if (process.stdout.isTTY !== true) {
+      chalk.level = 1;
+    }
   }
 
   static withPrefix(prefix) {
-    // Create a lightweight logger instance for this prefix. No cache is required
-    // because all instances share the same static history/listener backend.
+    // Create a callable Homebridge-style logger: log(...), log.info(...), log.warn(...), etc.
     let logger = new Logger(prefix);
-
-    // Return a callable function so this works like the Homebridge logger:
-    // log('message'), log.info(...), log.warn(...), etc.
     let log = logger.info.bind(logger);
 
-    // Bind all methods to preserve "this" when consumers call log.warn(...) or pass
-    // the methods around as callbacks.
     log.info = logger.info.bind(logger);
     log.success = logger.success.bind(logger);
     log.warn = logger.warn.bind(logger);
     log.error = logger.error.bind(logger);
     log.debug = logger.debug.bind(logger);
     log.log = logger.log.bind(logger);
-
-    // Expose prefix for code that expects the logger function to carry it.
     log.prefix = logger.prefix;
 
     return log;
@@ -101,44 +88,9 @@ export default class Logger {
     Logger.#timestampEnabled = enabled === true;
   }
 
-  static setMaxHistory(maxHistory) {
-    // Allow callers to tune the in-memory log buffer size without needing file logs.
-    if (Number.isFinite(Number(maxHistory)) === true && Number(maxHistory) > 0) {
-      Logger.#maxHistory = Number(maxHistory);
-
-      // If the buffer was reduced, trim existing history immediately.
-      while (Logger.#history.length > Logger.#maxHistory) {
-        Logger.#history.shift();
-      }
-    }
-  }
-
-  static history() {
-    // Return a copy so consumers cannot mutate internal logger state.
-    return [...Logger.#history];
-  }
-
-  static addListener(listener) {
-    // Register a live log listener. Used by HomeKitUI to stream new log entries.
-    if (typeof listener === 'function') {
-      Logger.#listeners.add(listener);
-    }
-  }
-
-  static removeListener(listener) {
-    // Remove a live listener when a web client disconnects or UI stops.
-    Logger.#listeners.delete(listener);
-  }
-
-  static clearHistory() {
-    // Clear the in-memory log buffer only. This does not affect terminal output.
-    Logger.#history = [];
-  }
-
-  static forceColor() {
-    // Force basic ANSI colour support. Useful when running under environments where
-    // chalk does not detect colour support automatically.
-    chalk.level = 1;
+  static forceColor(level = 1) {
+    // Force ANSI colour support when the runtime cannot auto-detect it.
+    chalk.level = Number.isFinite(Number(level)) && Number(level) > 0 ? Number(level) : 1;
   }
 
   info(message, ...parameters) {
@@ -173,87 +125,37 @@ export default class Logger {
     }
 
     // util.format keeps existing logger behaviour for "%s", "%d", objects, etc.
-    let plainMessage = util.format(message, ...parameters);
-    let terminalMessage = plainMessage;
-
-    // Apply level colour to the message body only. Prefix and timestamp are added
-    // afterwards so they can have their own consistent colours.
+    let terminalMessage = util.format(message, ...parameters);
     let loggingFunction = console.log;
-    switch (level) {
-      case LogLevel.SUCCESS:
-        terminalMessage = chalk.green(terminalMessage);
-        break;
 
-      case LogLevel.WARN:
-        terminalMessage = chalk.yellow(terminalMessage);
-        loggingFunction = console.error;
-        break;
-
-      case LogLevel.ERROR:
-        terminalMessage = chalk.red(terminalMessage);
-        loggingFunction = console.error;
-        break;
-
-      case LogLevel.DEBUG:
-        terminalMessage = chalk.gray(terminalMessage);
-        break;
-
-      default:
-        break;
+    // Apply level colour to the message body only. Prefix and timestamp are added afterwards.
+    if (level === LogLevel.SUCCESS) {
+      terminalMessage = chalk.green(terminalMessage);
+    }
+    if (level === LogLevel.WARN) {
+      terminalMessage = chalk.yellow(terminalMessage);
+      loggingFunction = console.error;
+    }
+    if (level === LogLevel.ERROR) {
+      terminalMessage = chalk.red(terminalMessage);
+      loggingFunction = console.error;
+    }
+    if (level === LogLevel.DEBUG) {
+      terminalMessage = chalk.gray(terminalMessage);
     }
 
-    // Add optional prefix after colourising the message. This mirrors the original
-    // Homebridge-style output.
+    // Add optional prefix after colourising the message. This mirrors Homebridge-style output.
     if (this.prefix !== undefined) {
-      terminalMessage = getLogPrefix(this.prefix) + ' ' + terminalMessage;
-      plainMessage = '[' + this.prefix + '] ' + plainMessage;
+      terminalMessage = chalk.cyan('[' + this.prefix + ']') + ' ' + terminalMessage;
     }
 
-    // Add timestamp last so the complete terminal line matches what appears in the
-    // console, while plainMessage remains suitable for searching/filtering.
+    // Add timestamp last so terminal output matches the final console line.
     if (Logger.#timestampEnabled === true) {
-      let date = new Date();
-      let timestamp = '[' + date.toLocaleString() + '] ';
-
-      terminalMessage = chalk.white(timestamp) + terminalMessage;
-      plainMessage = timestamp + plainMessage;
+      terminalMessage = chalk.white('[' + new Date().toLocaleString() + '] ') + terminalMessage;
     }
 
-    // Write to the terminal first to preserve normal logging behaviour.
+    // Write formatted output to console
     loggingFunction(terminalMessage);
-
-    // Store and emit the final formatted entry for UI consumers.
-    this.#addHistory(level, terminalMessage, plainMessage);
-  }
-
-  #addHistory(level, terminalMessage, plainMessage) {
-    // Build one structured log entry. The HTML field lets HomeKitUI render chalk
-    // colours without needing to parse terminal output itself.
-    let entry = {
-      time: new Date().toISOString(),
-      level,
-      prefix: this.prefix,
-      message: plainMessage,
-      terminal: terminalMessage,
-      html: Logger.#ansi.ansi_to_html(terminalMessage),
-    };
-
-    Logger.#history.push(entry);
-
-    // Keep memory bounded.
-    while (Logger.#history.length > Logger.#maxHistory) {
-      Logger.#history.shift();
-    }
-
-    // Notify listeners safely. One bad listener must not break logging.
-    Logger.#listeners.forEach((listener) => {
-      try {
-        listener(entry);
-        // eslint-disable-next-line no-unused-vars
-      } catch (error) {
-        // Empty
-      }
-    });
   }
 }
 

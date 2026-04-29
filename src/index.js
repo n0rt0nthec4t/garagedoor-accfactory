@@ -288,7 +288,7 @@ for (let door of config.doors) {
   };
 
   let tempDevice = new GarageDoor(undefined, HAP, log, deviceData);
-  let accessory = await tempDevice.add(door.name, HAP.Categories.GARAGE_DOOR_OPENER, true);
+  let accessory = await tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
 
   accessories.push(accessory);
 }
@@ -326,8 +326,9 @@ if (config.options.webUIPort > 0) {
         schemaPath: 'options',
       },
     ],
+
     onRestart: async () => {
-      process.exit(0);
+      await shutdown('restart', 1);
     },
   });
 
@@ -335,21 +336,30 @@ if (config.options.webUIPort > 0) {
 }
 
 // Handle process shutdown
-async function shutdown(signal) {
-  log.warn('Received %s, shutting down gracefully...', signal);
-
-  if (ui !== undefined) {
-    await ui.stop();
+let shuttingDown = false;
+async function shutdown(signal, exitCode = 0) {
+  if (shuttingDown === true) {
+    return;
   }
 
-  process.exit(0);
+  shuttingDown = true;
+
+  log.warn('Received %s, shutting down gracefully...', signal);
+
+  await HomeKitDevice.shutdown();
+
+  if (ui !== undefined) {
+    ui.stop().catch(() => {
+      // Empty
+    });
+  }
+
+  process.exit(exitCode);
 }
 
 // Register process signal handlers for graceful shutdown
-process.once('SIGTERM', () => {
-  shutdown('SIGTERM');
-});
-
-process.once('SIGINT', () => {
-  shutdown('SIGINT');
+['SIGINT', 'SIGTERM'].forEach((signal) => {
+  process.once(signal, () => {
+    shutdown(signal, 0);
+  });
 });

@@ -17,7 +17,7 @@ const DOOR_STATUS_INTERVAL = 1000;
 
 export default class GarageDoor extends HomeKitDevice {
   static TYPE = 'GarageDoor';
-  static VERSION = '2026.03.05'; // Code version
+  static VERSION = '2026.04.28'; // Code version
 
   static DOOR_EVENT = 'door-event'; // Door status event tag
   static TIMER_DOOR_STATUS_POLL = 'door-status-poll'; // Timer handle for door status polling
@@ -402,6 +402,7 @@ export default class GarageDoor extends HomeKitDevice {
     // Clean up GPIO pins on shutdown
     if (this.#validGPIOPin(this.deviceData?.pushButton) === true) {
       try {
+        this?.log?.debug?.('Closing pushButton GPIO pin: %s', this.deviceData.pushButton);
         GPIO.close(this.deviceData.pushButton);
       } catch (error) {
         this?.log?.debug?.('Error closing pushButton GPIO pin: %s', String(error));
@@ -410,6 +411,7 @@ export default class GarageDoor extends HomeKitDevice {
 
     if (this.#validGPIOPin(this.deviceData?.closedSensor) === true) {
       try {
+        this?.log?.debug?.('Closing closedSensor GPIO pin: %s', this.deviceData.closedSensor);
         GPIO.close(this.deviceData.closedSensor);
       } catch (error) {
         this?.log?.debug?.('Error closing closedSensor GPIO pin: %s', String(error));
@@ -418,6 +420,7 @@ export default class GarageDoor extends HomeKitDevice {
 
     if (this.#validGPIOPin(this.deviceData?.openSensor) === true) {
       try {
+        this?.log?.debug?.('Closing openSensor GPIO pin: %s', this.deviceData.openSensor);
         GPIO.close(this.deviceData.openSensor);
       } catch (error) {
         this?.log?.debug?.('Error closing openSensor GPIO pin: %s', String(error));
@@ -426,6 +429,7 @@ export default class GarageDoor extends HomeKitDevice {
 
     if (this.#validGPIOPin(this.deviceData?.obstructionSensor) === true) {
       try {
+        this?.log?.debug?.('Closing obstructionSensor GPIO pin: %s', this.deviceData.obstructionSensor);
         GPIO.close(this.deviceData.obstructionSensor);
       } catch (error) {
         this?.log?.debug?.('Error closing obstructionSensor GPIO pin: %s', String(error));
@@ -560,7 +564,7 @@ export default class GarageDoor extends HomeKitDevice {
   }
 
   #validGPIOPin(pin) {
-    return isNaN(pin) === false && Number(pin) >= GarageDoor.MIN_GPIO_PIN && Number(pin) <= GarageDoor.MAX_GPIO_PIN;
+    return Number.isFinite(Number(pin)) === true && Number(pin) >= GarageDoor.MIN_GPIO_PIN && Number(pin) <= GarageDoor.MAX_GPIO_PIN;
   }
 
   #mapCurrentDoorState(state) {

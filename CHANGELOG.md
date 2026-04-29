@@ -2,6 +2,10 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.9 (2026/04/29)
+
+- Updated `HomeKitUI` module
+
 ## v0.1.7 (2026/04/28)
 
 - Added schema-driven configuration UI with dynamic form rendering
