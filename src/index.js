@@ -39,7 +39,7 @@
 //     GPIO6   Output 3
 //     GPIO16  Relay 1
 //
-// Code Version 2026.04.28
+// Code Version 2026.05.04
 // Mark Hulskamp
 'use strict';
 
@@ -63,7 +63,7 @@ HomeKitDevice.PLUGIN_NAME = 'garagedoor-accfactory';
 HomeKitDevice.PLATFORM_NAME = 'GarageDoorAccfactory';
 
 import HomeKitHistory from './HomeKitHistory.js';
-HomeKitDevice.HISTORY = HomeKitHistory;
+HomeKitDevice.EVEHOME = HomeKitHistory;
 
 import HomeKitUI from './HomeKitUI.js';
 
@@ -94,6 +94,7 @@ function loadConfiguration(filename) {
         debug: false,
         eveHistory: true,
         hkPairingCode: ACCESSORY_PINCODE,
+        webUIPort: 0,
       },
     };
 

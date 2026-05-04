@@ -1,7 +1,6 @@
 {
   "doors": [
     {
-      "hkUsername": "69:1A:A4:58:51:78",
       "name": "Garage Door",
       "manufacturer": "A Door Company",
       "model": "MT-1234",
@@ -17,7 +16,6 @@
   "options": {
     "debug": true,
     "eveHistory": true,
-    "hkPairingCode": "031-45-154",
-    "webUIPort": 8582
+    "hkPairingCode": "031-45-154"
   }
 }
