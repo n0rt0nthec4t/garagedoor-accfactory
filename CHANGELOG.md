@@ -2,6 +2,15 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.13 (2026/05/10)
+
+- Updated `hap-nodejs` requirement to `^2.1.6`
+- Updated `HomeKitDevice`, `HomeKitHistory`, and `HomeKitUI` modules
+- Updated `GarageDoor` to use the latest `HomeKitDevice` constructor, shared logger setup, and service/characteristic helper method names
+- Added Web UI bearer token preservation and authentication wiring
+- Improved garage door safety handling for obstruction and sensor fault states
+- Added timed-only door state fallback for installations without open/closed sensors
+
 ## v0.1.9 (2026/04/29)
 
 - Updated `HomeKitUI` module

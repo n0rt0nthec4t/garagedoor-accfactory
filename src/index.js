@@ -39,7 +39,7 @@
 //     GPIO6   Output 3
 //     GPIO16  Relay 1
 //
-// Code Version 2026.05.04
+// Code Version 2026.05.10
 // Mark Hulskamp
 'use strict';
 
@@ -70,6 +70,8 @@ import HomeKitUI from './HomeKitUI.js';
 import Logger from './logger.js';
 const log = Logger.withPrefix(HomeKitDevice.PLATFORM_NAME);
 
+HomeKitDevice.LOGGER = log; // Setup a reference to our logger for use in our HomeKitDevice module
+
 // Define constants
 const { version } = createRequire(import.meta.url)('../package.json'); // Import the package.json file to get the version number
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // Make a defined for JS __dirname
@@ -95,6 +97,7 @@ function loadConfiguration(filename) {
         eveHistory: true,
         hkPairingCode: ACCESSORY_PINCODE,
         webUIPort: 0,
+        webUIBearerToken: '',
       },
     };
 
@@ -177,6 +180,7 @@ function loadConfiguration(filename) {
           Number.isFinite(Number(value?.webUIPort)) === true && Number(value.webUIPort) > 0 && Number(value.webUIPort) <= 65535
             ? Number(value.webUIPort)
             : 0;
+        config.options.webUIBearerToken = typeof value?.webUIBearerToken === 'string' ? value.webUIBearerToken.trim() : '';
       }
     });
 
@@ -288,7 +292,7 @@ for (let door of config.doors) {
     buttonBehavior: door.buttonBehavior,
   };
 
-  let tempDevice = new GarageDoor(undefined, HAP, log, deviceData);
+  let tempDevice = new GarageDoor(undefined, HAP, deviceData);
   let accessory = await tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
 
   accessories.push(accessory);
@@ -300,7 +304,12 @@ if (config.options.webUIPort > 0) {
   ui = new HomeKitUI({
     name: 'Garage Door',
     version,
+    host: '0.0.0.0',
     port: config.options.webUIPort,
+    auth: {
+      enabled: typeof config.options.webUIBearerToken === 'string' && config.options.webUIBearerToken !== '',
+      bearerToken: config.options.webUIBearerToken,
+    },
     configFile: configurationFile,
     schemaFile: CONFIG_SCHEMA_FILE,
     accessories,
