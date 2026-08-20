@@ -2,6 +2,14 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.1.14 (2026/08/20)
+
+- Updated `@homebridge/hap-nodejs` to `^2.2.2` and aligned the declared `hap-nodejs` engine requirement
+- Updated runtime and development dependencies, including Chalk, ESLint, Prettier, and TypeScript tooling
+- Added Node.js 26 runtime support and aligned the Node.js type definitions
+- Updated `HomeKitDevice` and `HomeKitHistory` modules
+- Refreshed transitive dependencies to resolve all reported npm security advisories
+
 ## v0.1.13 (2026/05/10)
 
 - Updated `hap-nodejs` requirement to `^2.1.6`
