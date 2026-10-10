@@ -39,7 +39,7 @@
 //     GPIO6   Output 3
 //     GPIO16  Relay 1
 //
-// Code Version 2026.05.10
+// Code Version 2026.10.10
 // Mark Hulskamp
 'use strict';
 
@@ -85,113 +85,122 @@ function loadConfiguration(filename) {
     return;
   }
 
-  let config = undefined;
-
-  try {
-    let loadedConfig = JSON.parse(fs.readFileSync(filename, 'utf8').trim());
-
-    config = {
-      doors: [],
-      options: {
-        debug: false,
-        eveHistory: true,
-        hkPairingCode: ACCESSORY_PINCODE,
-        webUIPort: 0,
-        webUIBearerToken: '',
-      },
-    };
-
-    Object.entries(loadedConfig).forEach(([key, value]) => {
-      if (key === 'doors' && Array.isArray(value) === true) {
-        // Validate doors section
-        let unnamedCount = 1;
-        value.forEach((door) => {
-          let tempDoor = {
-            hkUsername:
-              typeof door?.hkUsername === 'string' && door.hkUsername !== ''
-                ? door.hkUsername.trim()
-                : crypto
-                    .randomBytes(6)
-                    .toString('hex')
-                    .toUpperCase()
-                    .split(/(..)/)
-                    .filter((s) => s)
-                    .join(':'),
-            name:
-              typeof door?.name === 'string' && door.name !== ''
-                ? HomeKitDevice.makeValidHKName(door.name.trim())
-                : 'Door ' + unnamedCount++,
-            manufacturer: typeof door?.manufacturer === 'string' && door.manufacturer !== '' ? door.manufacturer.trim() : '',
-            model: typeof door?.model === 'string' && door.model !== '' ? door.model.trim() : '',
-            serialNumber:
-              typeof door?.serialNumber === 'string' && door.serialNumber !== ''
-                ? door.serialNumber.trim()
-                : crc32(crypto.randomUUID().toUpperCase()).toString(),
-            pushButton:
-              Number.isFinite(Number(door?.pushButton)) === true &&
-              Number(door.pushButton) >= GarageDoor.MIN_GPIO_PIN &&
-              Number(door.pushButton) <= GarageDoor.MAX_GPIO_PIN
-                ? Number(door.pushButton)
-                : undefined,
-            closedSensor:
-              Number.isFinite(Number(door?.closedSensor)) === true &&
-              Number(door.closedSensor) >= GarageDoor.MIN_GPIO_PIN &&
-              Number(door.closedSensor) <= GarageDoor.MAX_GPIO_PIN
-                ? Number(door.closedSensor)
-                : undefined,
-            openSensor:
-              Number.isFinite(Number(door?.openSensor)) === true &&
-              Number(door.openSensor) >= GarageDoor.MIN_GPIO_PIN &&
-              Number(door.openSensor) <= GarageDoor.MAX_GPIO_PIN
-                ? Number(door.openSensor)
-                : undefined,
-            obstructionSensor:
-              Number.isFinite(Number(door?.obstructionSensor)) === true &&
-              Number(door.obstructionSensor) >= GarageDoor.MIN_GPIO_PIN &&
-              Number(door.obstructionSensor) <= GarageDoor.MAX_GPIO_PIN
-                ? Number(door.obstructionSensor)
-                : undefined,
-            openTime:
-              Number.isFinite(Number(door?.openTime)) === true && Number(door.openTime) >= 0 && Number(door.openTime) <= 300
-                ? Number(door.openTime)
-                : 30,
-            closeTime:
-              Number.isFinite(Number(door?.closeTime)) === true && Number(door.closeTime) >= 0 && Number(door.closeTime) <= 300
-                ? Number(door.closeTime)
-                : 30,
-            buttonBehavior:
-              typeof door?.buttonBehavior === 'string' &&
-              ['stop-then-reverse', 'auto-reverse', 'always-toggle'].includes(door.buttonBehavior)
-                ? door.buttonBehavior
-                : 'stop-then-reverse',
-          };
-
-          config.doors.push(tempDoor);
-        });
-      }
-      if (key === 'options' && Array.isArray(value) === false && typeof value === 'object') {
-        config.options.debug = value?.debug === true;
-        config.options.eveHistory = value?.eveHistory === true;
-        config.options.hkPairingCode =
-          HomeKitDevice.HK_PIN_3_2_3.test(value?.hkPairingCode) === true || HomeKitDevice.HK_PIN_4_4.test(value?.hkPairingCode) === true
-            ? value.hkPairingCode
-            : ACCESSORY_PINCODE;
-        config.options.webUIPort =
-          Number.isFinite(Number(value?.webUIPort)) === true && Number(value.webUIPort) > 0 && Number(value.webUIPort) <= 65535
-            ? Number(value.webUIPort)
-            : 0;
-        config.options.webUIBearerToken = typeof value?.webUIBearerToken === 'string' ? value.webUIBearerToken.trim() : '';
-      }
-    });
-
-    // Write config backout!!
-    fs.writeFileSync(filename, JSON.stringify(config, null, 2) + '\n');
-
-    // eslint-disable-next-line no-unused-vars
-  } catch (error) {
-    // Empty
+  let loadedConfig = JSON.parse(fs.readFileSync(filename, 'utf8').trim());
+  if (
+    loadedConfig === null ||
+    typeof loadedConfig !== 'object' ||
+    Array.isArray(loadedConfig) === true ||
+    Array.isArray(loadedConfig.doors) !== true
+  ) {
+    throw new TypeError('Configuration must contain a doors array');
   }
 
+  let config = {
+    doors: [],
+    options: {
+      debug: false,
+      eveHistory: true,
+      hkPairingCode: ACCESSORY_PINCODE,
+      webUIPort: 0,
+      webUIBearerToken: '',
+    },
+  };
+
+  // GPIO is process-wide; reject ownership collisions before any door changes a pin's mode.
+  const assignedPins = new Map();
+  Object.entries(loadedConfig).forEach(([key, value]) => {
+    if (key === 'doors' && Array.isArray(value) === true) {
+      // Validate doors section
+      let unnamedCount = 1;
+      value.forEach((door, doorIndex) => {
+        if (door === null || typeof door !== 'object' || Array.isArray(door) === true) {
+          throw new TypeError('Each configured door must be an object');
+        }
+        for (let field of ['pushButton', 'closedSensor', 'openSensor', 'obstructionSensor']) {
+          if (Object.hasOwn(door, field) === true && GarageDoor.isValidGPIOPin(door[field]) !== true) {
+            throw new TypeError('Invalid GPIO pin for ' + field);
+          }
+          if (Object.hasOwn(door, field) === true) {
+            const pin = Number(door[field]);
+            if (assignedPins.has(pin) === true) {
+              throw new TypeError('GPIO pin ' + pin + ' is already assigned to ' + assignedPins.get(pin));
+            }
+            assignedPins.set(pin, 'door ' + (doorIndex + 1) + ' ' + field);
+          }
+        }
+        let tempDoor = {
+          hkUsername:
+            typeof door?.hkUsername === 'string' && door.hkUsername !== ''
+              ? door.hkUsername.trim()
+              : crypto
+                  .randomBytes(6)
+                  .toString('hex')
+                  .toUpperCase()
+                  .split(/(..)/)
+                  .filter((s) => s)
+                  .join(':'),
+          name:
+            typeof door?.name === 'string' && door.name !== '' ? HomeKitDevice.makeValidHKName(door.name.trim()) : 'Door ' + unnamedCount++,
+          manufacturer: typeof door?.manufacturer === 'string' && door.manufacturer !== '' ? door.manufacturer.trim() : '',
+          model: typeof door?.model === 'string' && door.model !== '' ? door.model.trim() : '',
+          serialNumber:
+            typeof door?.serialNumber === 'string' && door.serialNumber !== ''
+              ? door.serialNumber.trim()
+              : crc32(crypto.randomUUID().toUpperCase()).toString(),
+          pushButton: GarageDoor.isValidGPIOPin(door?.pushButton) === true ? Number(door.pushButton) : undefined,
+          closedSensor: GarageDoor.isValidGPIOPin(door?.closedSensor) === true ? Number(door.closedSensor) : undefined,
+          openSensor: GarageDoor.isValidGPIOPin(door?.openSensor) === true ? Number(door.openSensor) : undefined,
+          obstructionSensor: GarageDoor.isValidGPIOPin(door?.obstructionSensor) === true ? Number(door.obstructionSensor) : undefined,
+          openTime:
+            Number.isFinite(Number(door?.openTime)) === true && Number(door.openTime) >= 0 && Number(door.openTime) <= 300
+              ? Number(door.openTime)
+              : 30,
+          closeTime:
+            Number.isFinite(Number(door?.closeTime)) === true && Number(door.closeTime) >= 0 && Number(door.closeTime) <= 300
+              ? Number(door.closeTime)
+              : 30,
+          buttonBehavior:
+            typeof door?.buttonBehavior === 'string' && ['stop-then-reverse', 'auto-reverse', 'always-toggle'].includes(door.buttonBehavior)
+              ? door.buttonBehavior
+              : 'stop-then-reverse',
+        };
+
+        config.doors.push(tempDoor);
+      });
+    }
+    if (key === 'options' && Array.isArray(value) === false && typeof value === 'object') {
+      config.options.debug = value?.debug === true;
+      config.options.eveHistory = value?.eveHistory === true;
+      config.options.hkPairingCode =
+        HomeKitDevice.HK_PIN_3_2_3.test(value?.hkPairingCode) === true || HomeKitDevice.HK_PIN_4_4.test(value?.hkPairingCode) === true
+          ? value.hkPairingCode
+          : ACCESSORY_PINCODE;
+      config.options.webUIPort =
+        Number.isFinite(Number(value?.webUIPort)) === true && Number(value.webUIPort) > 0 && Number(value.webUIPort) <= 65535
+          ? Number(value.webUIPort)
+          : 0;
+      config.options.webUIBearerToken = typeof value?.webUIBearerToken === 'string' ? value.webUIBearerToken.trim() : '';
+    }
+  });
+
+  // Persist generated pairing identities before the caller can publish accessories.
+  // Rename on the same filesystem preserves the previous config if writing fails.
+  const target = fs.realpathSync(filename);
+  const temporary = target + '.' + crypto.randomUUID() + '.tmp';
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(config, null, 2) + '\n', {
+      flag: 'wx',
+      mode: fs.statSync(target).mode & 0o777,
+    });
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    try {
+      fs.rmSync(temporary, { force: true });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Failed to save configuration and clean up temporary file');
+    }
+    throw error;
+  }
   return config;
 }
 
@@ -250,7 +259,13 @@ if (fs.existsSync(configurationFile) === false) {
 }
 
 // Have a configuration file, now load the configuration options
-let config = loadConfiguration(configurationFile);
+let config;
+try {
+  config = loadConfiguration(configurationFile);
+} catch (error) {
+  log.error('Failed to load or save configuration "%s": %s', configurationFile, String(error));
+  process.exit(1);
+}
 if (config === undefined) {
   log.error('Configuration "%s" contains invalid JSON or structure', configurationFile);
   process.exit(1);
@@ -293,9 +308,18 @@ for (let door of config.doors) {
   };
 
   let tempDevice = new GarageDoor(undefined, HAP, deviceData);
-  let accessory = await tempDevice.add('Garage Door', HAP.Categories.GARAGE_DOOR_OPENER, true);
+  let added = await tempDevice.add({
+    hapAccessoryName: 'Garage Door',
+    hapCategory: HAP.Categories.GARAGE_DOOR_OPENER,
+    enableHistory: config.options.eveHistory === true,
+  });
 
-  accessories.push(accessory);
+  // add() reports setup success; the HAP accessory is exposed on the device.
+  if (added === true) {
+    accessories.push(tempDevice.accessory);
+  } else {
+    log.error('Failed to set up garage door "%s"', door.name);
+  }
 }
 
 // Start HomeKit Web UI if configured to do so
@@ -356,15 +380,24 @@ async function shutdown(signal, exitCode = 0) {
 
   log.warn('Received %s, shutting down gracefully...', signal);
 
-  await HomeKitDevice.shutdown();
-
-  if (ui !== undefined) {
-    ui.stop().catch(() => {
-      // Empty
-    });
+  let shutdownExitCode = exitCode;
+  try {
+    await HomeKitDevice.shutdown();
+  } catch (error) {
+    log.error('Failed to shut down garage doors: %s', String(error));
+    shutdownExitCode = 1;
   }
 
-  process.exit(exitCode);
+  if (ui !== undefined) {
+    try {
+      await ui.stop();
+    } catch (error) {
+      log.error('Failed to stop Web UI: %s', String(error));
+      shutdownExitCode = 1;
+    }
+  }
+
+  process.exit(shutdownExitCode);
 }
 
 // Register process signal handlers for graceful shutdown

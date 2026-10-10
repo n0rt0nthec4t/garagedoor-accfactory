@@ -47,6 +47,11 @@ eg:
 | obstructionSensor | RPi GPIO pin for door obstruction sensor (optional)                                           |            |
 | serialNumber      | Serial Number of the garage door opener                                                       |            |
 
+GPIO pins must be integers from 0 to 26. Numeric strings are accepted. Each pin must have one owner across all doors.
+Omit unused sensor fields; `null`, booleans,
+empty strings, and fractional pins are rejected. Configuration validation or save failures stop startup with an error.
+Generated HomeKit identities are saved atomically before accessories are published.
+
 ### Configuration Options
 
 The following options are available in garagedoor_config.json **options** object.

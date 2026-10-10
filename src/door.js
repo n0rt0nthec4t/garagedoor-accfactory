@@ -28,7 +28,7 @@
 // - Sensor-based installations can still use timing as fallback for movement inference if desired
 // - GPIO pin numbers must be specified in BCM mode (not physical pin numbers)
 //
-// Code version 2026.05.07
+// Code version 2026.10.10
 // Mark Hulskamp
 'use strict';
 
@@ -47,7 +47,7 @@ const DOOR_STATUS_INTERVAL = 1000;
 
 export default class GarageDoor extends HomeKitDevice {
   static TYPE = 'GarageDoor';
-  static VERSION = '2026.05.07'; // Code version
+  static VERSION = '2026.10.10'; // Code version
 
   static DOOR_EVENT = 'door-event'; // Door status event tag
   static TIMER_DOOR_STATUS_POLL = 'door-status-poll'; // Timer handle for door status polling
@@ -78,6 +78,8 @@ export default class GarageDoor extends HomeKitDevice {
   #lastDoorStatus = undefined;
   #lastObstructionStatus = undefined;
   #moveStartedTime = undefined;
+  #relayFault = false; // Retain output failures until a release write succeeds
+  #motionActive = false; // Only time observed departures or successfully commanded movement
   #obstructionDetected = false;
 
   constructor(accessory, api, deviceData) {
@@ -91,7 +93,7 @@ export default class GarageDoor extends HomeKitDevice {
   }
 
   // Class functions
-  onAdd() {
+  async onAdd() {
     // Setup the garagedoor service if not already present on the accessory and link it to the Eve app if configured to do so
     this.doorService = this.addService(this.hap.Service.GarageDoorOpener, '', 1, {});
     this.doorService.setPrimaryService();
@@ -160,23 +162,25 @@ export default class GarageDoor extends HomeKitDevice {
       });
     }
 
+    const doorClosed = this.isClosed();
+    const doorOpen = this.isOpen();
+    const obstruction = this.hasObstruction();
     let initial = GarageDoor.STOPPED;
-
-    // Infer physical initial state
-    if (this.isClosed() === true) {
+    // Configured sensor failures must be visible before the accessory is published.
+    if (
+      this.#sensorReadFailed('closedSensor', doorClosed) === true ||
+      this.#sensorReadFailed('openSensor', doorOpen) === true ||
+      this.#sensorReadFailed('obstructionSensor', obstruction) === true ||
+      (doorClosed === true && doorOpen === true)
+    ) {
+      initial = GarageDoor.FAULT;
+    } else if (doorClosed === true) {
       initial = GarageDoor.CLOSED;
-      this.#lastMovementDirection = GarageDoor.OPENING;
       this.postSetupDetail('Door is closed');
-    }
-
-    if (this.isClosed() !== true && this.isOpen() === true) {
+    } else if (doorOpen === true) {
       initial = GarageDoor.OPENED;
-      this.#lastMovementDirection = GarageDoor.CLOSING;
       this.postSetupDetail('Door is open');
-    }
-
-    if (initial === GarageDoor.STOPPED) {
-      this.#lastMovementDirection = GarageDoor.OPENING;
+    } else {
       this.postSetupDetail('Door is between opened/closed');
     }
 
@@ -202,7 +206,7 @@ export default class GarageDoor extends HomeKitDevice {
     });
 
     // Push initial state to HomeKit to prevent stale status
-    this.message(GarageDoor.DOOR_EVENT, { status: this.currentDoorStatus });
+    await this.message(GarageDoor.DOOR_EVENT, { status: this.currentDoorStatus });
 
     // Start periodic door status polling via parent class timer system
     this.addTimer(GarageDoor.TIMER_DOOR_STATUS_POLL, {
@@ -211,76 +215,85 @@ export default class GarageDoor extends HomeKitDevice {
     });
   }
 
-  async setDoorPosition(position) {
-    // Map HomeKit target to direction and final state
-    let targetDir = position === this.hap.Characteristic.TargetDoorState.OPEN ? GarageDoor.OPEN : GarageDoor.CLOSE;
-    let targetFinal = targetDir === GarageDoor.OPEN ? GarageDoor.OPENED : GarageDoor.CLOSED;
-    let behavior = typeof this.deviceData?.buttonBehavior === 'string' ? this.deviceData.buttonBehavior : 'stop-then-reverse';
+  setDoorPosition(position) {
+    // Use the shared lifecycle queue so commands, polling, and shutdown cannot overlap GPIO work.
+    return this.set({ targetDoorState: position });
+  }
 
+  async onSet(message) {
+    if (Object.hasOwn(message, 'targetDoorState') === true) {
+      await this.#setDoorPosition(message.targetDoorState);
+    }
+  }
+
+  async #setDoorPosition(position) {
+    if (position !== this.hap.Characteristic.TargetDoorState.OPEN && position !== this.hap.Characteristic.TargetDoorState.CLOSED) {
+      throw new TypeError('Invalid target door state');
+    }
+    const opening = position === this.hap.Characteristic.TargetDoorState.OPEN;
+    const direction = opening === true ? GarageDoor.OPENING : GarageDoor.CLOSING;
+    const final = opening === true ? GarageDoor.OPENED : GarageDoor.CLOSED;
+    const doorOpen = this.isOpen();
+    const doorClosed = this.isClosed();
+    if (
+      this.#sensorReadFailed('openSensor', doorOpen) === true ||
+      this.#sensorReadFailed('closedSensor', doorClosed) === true ||
+      (doorOpen === true && doorClosed === true)
+    ) {
+      await this.#reportFault();
+      throw new Error('Door position sensors are unavailable or contradictory');
+    }
+    if (this.#relayFault === true) {
+      throw new Error('Door relay is reporting a fault');
+    }
+    // Fresh endpoints take precedence over cached state, except while awaiting departure from the starting endpoint.
+    await this.#updateEndpoint(doorClosed, doorOpen);
     if (this.currentDoorStatus === GarageDoor.FAULT) {
-      this?.log?.warn?.('Door "%s" is reporting a fault so ignoring request for "%s"', this.deviceData.description, targetDir);
+      throw new Error('Door is reporting a fault');
+    }
+    await this.#checkObstruction();
+
+    if (this.currentDoorStatus === final || (this.#motionActive === true && this.#lastMovementDirection === direction)) {
       return;
     }
-
-    if (this.#obstructionDetected === true || this.hasObstruction() === true) {
-      this.#obstructionDetected = true;
-      this?.log?.warn?.('Door "%s" is reporting an obstruction so ignoring request for "%s"', this.deviceData.description, targetDir);
-      return;
+    const reversing = this.#motionActive === true && this.#lastMovementDirection !== direction;
+    const behavior = typeof this.deviceData.buttonBehavior === 'string' ? this.deviceData.buttonBehavior : 'stop-then-reverse';
+    const presses = reversing === true && behavior === 'stop-then-reverse' ? 2 : 1;
+    try {
+      await this.#pressButton(presses);
+    } catch (error) {
+      // A partially executed reversal or failed relay pulse cannot establish a reliable movement state.
+      await this.#reportFault();
+      throw error;
     }
+    this.#motionActive = true;
+    this.#moveStartedTime = Date.now();
+    this.#lastMovementDirection = direction;
+    this.#lastDoorStatus = opening === true ? GarageDoor.CLOSED : GarageDoor.OPENED;
+    await this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.MOVING, direction });
+  }
 
-    // Already fully there, no action needed
-    if (this.currentDoorStatus === targetFinal) {
-      this?.log?.debug?.('Door "%s" already %s', this.deviceData.description, targetDir);
-      return;
+  #sensorReadFailed(field, value) {
+    return this.#validGPIOPin(this.deviceData[field]) === true && value === undefined;
+  }
+
+  async #checkObstruction() {
+    const obstruction = this.hasObstruction();
+    if (this.#sensorReadFailed('obstructionSensor', obstruction) === true) {
+      await this.#reportFault();
+      throw new Error('Obstruction sensor is unavailable');
     }
-
-    // Already moving toward requested direction, no action needed (prevents accidental STOP)
-    if (
-      (this.currentDoorStatus === GarageDoor.OPENING && targetDir === GarageDoor.OPEN) ||
-      (this.currentDoorStatus === GarageDoor.CLOSING && targetDir === GarageDoor.CLOSE) ||
-      (this.currentDoorStatus === GarageDoor.MOVING && this.#lastMovementDirection === targetDir)
-    ) {
-      this.#lastMovementDirection = targetDir;
-      this?.log?.debug?.('Door "%s" already moving toward %s', this.deviceData.description, targetFinal);
-      return;
+    if (obstruction === true || this.#obstructionDetected === true) {
+      throw new Error('Door is obstructed');
     }
+  }
 
-    // Moving the wrong way, reversal using configured behavior
-    if (
-      (this.currentDoorStatus === GarageDoor.OPENING && targetDir === GarageDoor.CLOSE) ||
-      (this.currentDoorStatus === GarageDoor.CLOSING && targetDir === GarageDoor.OPEN) ||
-      (this.currentDoorStatus === GarageDoor.MOVING && this.#lastMovementDirection && this.#lastMovementDirection !== targetDir)
-    ) {
-      this?.log?.info?.('Reversing door "%s" from %s to %s (%s)', this.deviceData.description, this.currentDoorStatus, targetDir, behavior);
-
-      this.#lastMovementDirection = targetDir;
-      this.#lastDoorStatus = targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED;
-
-      if (behavior === 'auto-reverse' || behavior === 'always-toggle') {
-        await this.#pressButton(1); // single press
-      } else {
-        await this.#pressButton(2); // stop-then-reverse: explicit double press
-      }
-      return;
-    }
-
-    // From STOPPED/UNKNOWN or resting opposite final state , set baseline then go
-    if (
-      this.currentDoorStatus === GarageDoor.STOPPED ||
-      this.currentDoorStatus === GarageDoor.UNKNOWN ||
-      this.currentDoorStatus === (targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED)
-    ) {
-      this.#lastMovementDirection = targetDir;
-      this.#lastDoorStatus = targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED;
-      this?.log?.debug?.('Starting door "%s" toward %s', this.deviceData.description, targetFinal);
-      await this.#pressButton(1);
-      return;
-    }
-
-    // Fallback: press once toward desired state
-    this.#lastMovementDirection = targetDir;
-    this.#lastDoorStatus = targetFinal === GarageDoor.OPENED ? GarageDoor.CLOSED : GarageDoor.OPENED;
-    await this.#pressButton(1);
+  async #reportFault() {
+    this.#motionActive = false;
+    this.#moveStartedTime = undefined;
+    this.#lastDoorStatus = GarageDoor.FAULT;
+    this.#lastMovementDirection = undefined;
+    await this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.FAULT });
   }
 
   getDoorPosition() {
@@ -402,7 +415,7 @@ export default class GarageDoor extends HomeKitDevice {
         this.currentDoorStatus = GarageDoor.FAULT;
         this.doorService.updateCharacteristic(this.hap.Characteristic.StatusFault, this.hap.Characteristic.StatusFault.GENERAL_FAULT);
         this.doorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.hap.Characteristic.CurrentDoorState.STOPPED);
-        this?.log?.error?.('Door "%s" is reporting fault with sensors', this.deviceData.description);
+        this?.log?.error?.('Door "%s" is reporting a control or sensor fault', this.deviceData.description);
         return;
       }
 
@@ -435,11 +448,19 @@ export default class GarageDoor extends HomeKitDevice {
   async onTimer(message) {
     // Handle timer events dispatched by the parent class timer system
     if (message?.timer === GarageDoor.TIMER_DOOR_STATUS_POLL) {
-      this.#pollDoorStatus();
+      await this.#pollDoorStatus();
     }
   }
 
   async onShutdown() {
+    if (this.#relayFault === true) {
+      try {
+        GPIO.write(this.deviceData.pushButton, GPIO.LOW);
+        this.#relayFault = false;
+      } catch (error) {
+        this?.log?.error?.('Failed to release relay during shutdown: %s', String(error));
+      }
+    }
     // Clean up GPIO pins on shutdown
     if (this.#validGPIOPin(this.deviceData?.pushButton) === true) {
       try {
@@ -478,160 +499,111 @@ export default class GarageDoor extends HomeKitDevice {
     }
   }
 
-  #pollDoorStatus() {
-    // Check obstruction sensor
-    this.message(GarageDoor.DOOR_EVENT, {
-      status: this.hasObstruction() === true ? GarageDoor.OBSTRUCTION : GarageDoor.CLEAR,
+  async #updateEndpoint(doorClosed, doorOpen) {
+    if (doorClosed === true || doorOpen === true) {
+      const state = doorClosed === true ? GarageDoor.CLOSED : GarageDoor.OPENED;
+      const opening = this.#lastMovementDirection === GarageDoor.OPENING;
+      const target = opening === true ? GarageDoor.OPENED : GarageDoor.CLOSED;
+      const timeout = opening === true ? this.deviceData.openTime : this.deviceData.closeTime;
+      if (this.#motionActive === true && state !== target && Date.now() - this.#moveStartedTime < timeout * 1000) {
+        // An opener can take time to leave its endpoint after the pulse; keep the command pending to avoid a second toggle.
+        await this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.MOVING, direction: this.#lastMovementDirection });
+        return true;
+      }
+      this.#motionActive = false;
+      this.#moveStartedTime = undefined;
+      this.#lastDoorStatus = state;
+      this.#lastMovementDirection = undefined;
+      await this.message(GarageDoor.DOOR_EVENT, { status: state });
+      return true;
+    }
+
+    return false;
+  }
+
+  async #pollDoorStatus() {
+    if (this.#relayFault === true) {
+      // Position sensors cannot establish output health. Retry release before clearing a control fault.
+      try {
+        GPIO.write(this.deviceData.pushButton, GPIO.LOW);
+        this.#relayFault = false;
+      } catch (error) {
+        this?.log?.error?.('Failed to release relay for "%s": %s', this.deviceData.description, String(error));
+        await this.#reportFault();
+        return;
+      }
+    }
+    const obstruction = this.hasObstruction();
+    const doorClosed = this.isClosed();
+    const doorOpen = this.isOpen();
+
+    // Missing optional sensors differ from configured sensors that could not be read.
+    // Keep the previous obstruction visible until the configured sensor reports a clear reading.
+    if (
+      this.#sensorReadFailed('obstructionSensor', obstruction) === true ||
+      this.#sensorReadFailed('closedSensor', doorClosed) === true ||
+      this.#sensorReadFailed('openSensor', doorOpen) === true ||
+      (doorClosed === true && doorOpen === true)
+    ) {
+      await this.#reportFault();
+      return;
+    }
+    await this.message(GarageDoor.DOOR_EVENT, {
+      status: obstruction === true ? GarageDoor.OBSTRUCTION : GarageDoor.CLEAR,
     });
 
-    let doorClosed = this.isClosed() === true;
-    let doorOpen = this.isOpen() === true;
-
-    if (doorClosed === true && doorOpen === true) {
-      this.#lastDoorStatus = GarageDoor.FAULT;
-      this.#lastMovementDirection = undefined;
-      this.#moveStartedTime = undefined;
-      this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.FAULT });
+    if ((await this.#updateEndpoint(doorClosed, doorOpen)) === true) {
       return;
     }
 
-    // Fully closed
-    if (doorClosed === true && doorOpen === false) {
-      if (this.currentDoorStatus !== GarageDoor.CLOSED) {
-        this.#lastDoorStatus = GarageDoor.CLOSED;
+    if (this.currentDoorStatus === GarageDoor.FAULT) {
+      this.#lastDoorStatus = GarageDoor.STOPPED;
+      await this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.STOPPED });
+    }
+
+    if (this.#motionActive === false) {
+      // Infer a physical-button trip only from the departure of an observed endpoint sensor.
+      // A timed-only endpoint gives no evidence that another movement has started.
+      if (this.#lastDoorStatus === GarageDoor.CLOSED && doorClosed === false) {
         this.#lastMovementDirection = GarageDoor.OPENING;
-        this.#moveStartedTime = undefined;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
-      }
-      return;
-    }
-
-    // Fully open
-    if (doorOpen === true && doorClosed === false) {
-      if (this.currentDoorStatus !== GarageDoor.OPENED) {
-        this.#lastDoorStatus = GarageDoor.OPENED;
+      } else if (this.#lastDoorStatus === GarageDoor.OPENED && doorOpen === false) {
         this.#lastMovementDirection = GarageDoor.CLOSING;
-        this.#moveStartedTime = undefined;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
+      } else {
+        return;
       }
-      return;
-    }
-
-    // Door in motion or mid-way
-    if (this.#moveStartedTime === undefined) {
+      this.#motionActive = true;
       this.#moveStartedTime = Date.now();
     }
 
-    // If previously STOPPED, suppress further direction inference until next change
-    if (this.#lastDoorStatus === GarageDoor.STOPPED) {
-      return;
-    }
-
-    let duration = Date.now() - this.#moveStartedTime;
-    let direction = GarageDoor.CLOSING;
-
-    // Infer direction
-    if (this.#lastDoorStatus === GarageDoor.CLOSED) {
-      direction = GarageDoor.OPENING;
-    }
-    if (this.#lastDoorStatus === GarageDoor.OPENED) {
-      direction = GarageDoor.CLOSING;
-    }
-    if (this.#lastMovementDirection === GarageDoor.OPENING) {
-      direction = GarageDoor.OPENING;
-    }
-
-    // Timeout fallback for OPENING
-    if (direction === GarageDoor.OPENING && duration >= this.deviceData.openTime * 1000) {
+    const direction = this.#lastMovementDirection;
+    const duration = Date.now() - this.#moveStartedTime;
+    const opening = direction === GarageDoor.OPENING;
+    const timeout = opening === true ? this.deviceData.openTime : this.deviceData.closeTime;
+    if (duration >= timeout * 1000) {
+      const sensor = opening === true ? this.deviceData.openSensor : this.deviceData.closedSensor;
+      const state = this.#validGPIOPin(sensor) === true ? GarageDoor.STOPPED : opening === true ? GarageDoor.OPENED : GarageDoor.CLOSED;
+      this.#motionActive = false;
       this.#moveStartedTime = undefined;
-
-      if (doorOpen === true && doorClosed === false) {
-        this.#lastDoorStatus = GarageDoor.OPENED;
-        this.#lastMovementDirection = GarageDoor.CLOSING;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
-      } else if (this.#validGPIOPin(this.deviceData?.openSensor) !== true) {
-        this?.log?.debug?.(
-          'Door "%s" assumed open after configured open time (%ds)',
-          this.deviceData.description,
-          this.deviceData.openTime,
-        );
-        this.#lastDoorStatus = GarageDoor.OPENED;
-        this.#lastMovementDirection = GarageDoor.CLOSING;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
-      } else {
-        this?.log?.warn?.(
-          'Door "%s" stopped before open sensor triggered (timeout %ds)',
-          this.deviceData.description,
-          this.deviceData.openTime,
-        );
-        this.#lastDoorStatus = GarageDoor.STOPPED;
-        this.#lastMovementDirection = undefined;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.STOPPED });
-      }
+      this.#lastMovementDirection = undefined;
+      this.#lastDoorStatus = state;
+      await this.message(GarageDoor.DOOR_EVENT, { status: state });
       return;
     }
+    await this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.MOVING, direction, duration });
+  }
 
-    // Timeout fallback for CLOSING
-    if (direction === GarageDoor.CLOSING && duration >= this.deviceData.closeTime * 1000) {
-      this.#moveStartedTime = undefined;
-
-      if (doorClosed === true && doorOpen === false) {
-        this.#lastDoorStatus = GarageDoor.CLOSED;
-        this.#lastMovementDirection = GarageDoor.OPENING;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
-      } else if (this.#validGPIOPin(this.deviceData?.closedSensor) !== true) {
-        this?.log?.debug?.(
-          'Door "%s" assumed closed after configured close time (%ds)',
-          this.deviceData.description,
-          this.deviceData.closeTime,
-        );
-        this.#lastDoorStatus = GarageDoor.CLOSED;
-        this.#lastMovementDirection = GarageDoor.OPENING;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
-      } else {
-        this?.log?.warn?.(
-          'Door "%s" stopped before closed sensor triggered (timeout %ds)',
-          this.deviceData.description,
-          this.deviceData.closeTime,
-        );
-        this.#lastDoorStatus = GarageDoor.STOPPED;
-        this.#lastMovementDirection = undefined;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.STOPPED });
-      }
-      return;
-    }
-
-    // Door has since stabilized (late sensor update)
-    if (doorOpen === true && doorClosed === false) {
-      if (this.currentDoorStatus !== GarageDoor.OPENED) {
-        this.#lastDoorStatus = GarageDoor.OPENED;
-        this.#lastMovementDirection = GarageDoor.CLOSING;
-        this.#moveStartedTime = undefined;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.OPENED });
-      }
-      return;
-    }
-
-    if (doorClosed === true && doorOpen === false) {
-      if (this.currentDoorStatus !== GarageDoor.CLOSED) {
-        this.#lastDoorStatus = GarageDoor.CLOSED;
-        this.#lastMovementDirection = GarageDoor.OPENING;
-        this.#moveStartedTime = undefined;
-        this.message(GarageDoor.DOOR_EVENT, { status: GarageDoor.CLOSED });
-      }
-      return;
-    }
-
-    // Still in motion
-    this.message(GarageDoor.DOOR_EVENT, {
-      status: GarageDoor.MOVING,
-      direction: direction,
-      duration: duration,
-    });
+  static isValidGPIOPin(pin) {
+    // Preserve numeric-string configuration support without coercing empty or boolean values into GPIO 0.
+    return (
+      (typeof pin === 'number' || (typeof pin === 'string' && pin.trim() !== '')) &&
+      Number.isInteger(Number(pin)) === true &&
+      Number(pin) >= GarageDoor.MIN_GPIO_PIN &&
+      Number(pin) <= GarageDoor.MAX_GPIO_PIN
+    );
   }
 
   #validGPIOPin(pin) {
-    return Number.isFinite(Number(pin)) === true && Number(pin) >= GarageDoor.MIN_GPIO_PIN && Number(pin) <= GarageDoor.MAX_GPIO_PIN;
+    return GarageDoor.isValidGPIOPin(pin);
   }
 
   #mapCurrentDoorState(state) {
@@ -648,17 +620,28 @@ export default class GarageDoor extends HomeKitDevice {
 
   async #pressButton(times = 1) {
     if (this.#validGPIOPin(this.deviceData?.pushButton) !== true) {
-      return;
+      throw new Error('No valid relay pin configured');
     }
 
     for (let i = 0; i < times; i++) {
       try {
-        GPIO.write(this.deviceData.pushButton, GPIO.HIGH);
-        await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
-        GPIO.write(this.deviceData.pushButton, GPIO.LOW);
+        // Recheck safety before each pulse, including the second pulse of a reversal.
+        await this.#checkObstruction();
+        try {
+          try {
+            GPIO.write(this.deviceData.pushButton, GPIO.HIGH);
+            await new Promise((resolve) => setTimeout(resolve, PUSHBUTTON_DELAY));
+          } finally {
+            // Always attempt relay release, even if activation failed.
+            GPIO.write(this.deviceData.pushButton, GPIO.LOW);
+          }
+        } catch (error) {
+          this.#relayFault = true;
+          throw error;
+        }
       } catch (error) {
         this?.log?.error?.('Error writing to pushButton GPIO pin "%s": %s', this.deviceData.pushButton, String(error));
-        return;
+        throw error;
       }
 
       if (i + 1 < times) {
