@@ -2,6 +2,19 @@
 
 All notable changes to `garagedoor-accfactory` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
+## v0.2.0 (2026/10/11)
+
+### Changed
+
+- Updated `HomeKitUI` to code version `2026.10.11`
+- Updated `HomeKitDevice` to code version `2026.10.11`, including shutdown completion and cancelled accessory setup fixes
+
+### Fixed
+
+- Rejected fractional Web UI ports during configuration loading and server startup; port 0 continues to disable the UI
+- Validated door configuration before Web UI saves and restores, preserving the existing file when GPIO assignments or settings are invalid; startup uses the same checks
+- Registered shutdown handlers before accessory setup, stopped further startup after signals, and awaited every owned door before exit; GPIO cleanup failures now produce a failing exit status without skipping other doors or Web UI cleanup
+
 ## v0.1.15 (2026/10/10)
 
 ### Added

@@ -14,8 +14,10 @@
     }
   ],
   "options": {
-    "debug": true,
+    "debug": false,
     "eveHistory": true,
-    "hkPairingCode": "031-45-154"
+    "hkPairingCode": "031-45-154",
+    "webUIPort": 8581,
+    "webUIBearerToken": ""
   }
 }

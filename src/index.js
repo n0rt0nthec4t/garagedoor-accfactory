@@ -39,7 +39,7 @@
 //     GPIO6   Output 3
 //     GPIO16  Relay 1
 //
-// Code Version 2026.10.10
+// Code Version 2026.10.11
 // Mark Hulskamp
 'use strict';
 
@@ -80,12 +80,9 @@ const CONFIGURATION_FILE = 'GarageDoor.json'; // Default configuration file name
 const CONFIG_SCHEMA_FILE = path.join(__dirname, './config.schema.json');
 
 // General helper functions
-function loadConfiguration(filename) {
-  if (typeof filename !== 'string' || filename === '' || fs.existsSync(filename) === false) {
-    return;
-  }
-
-  let loadedConfig = JSON.parse(fs.readFileSync(filename, 'utf8').trim());
+// Validate without changing the submitted configuration or writing to disk.
+// Optional settings keep their defaults; numeric strings remain supported.
+function validateConfiguration(loadedConfig) {
   if (
     loadedConfig === null ||
     typeof loadedConfig !== 'object' ||
@@ -94,6 +91,88 @@ function loadConfiguration(filename) {
   ) {
     throw new TypeError('Configuration must contain a doors array');
   }
+
+  // GPIO ownership spans every door, including relay and optional sensor pins.
+  const assignedPins = new Map();
+  loadedConfig.doors.forEach((door, doorIndex) => {
+    if (door === null || typeof door !== 'object' || Array.isArray(door) === true) {
+      throw new TypeError('Each configured door must be an object');
+    }
+    for (let field of ['pushButton', 'closedSensor', 'openSensor', 'obstructionSensor']) {
+      if (Object.hasOwn(door, field) === true && GarageDoor.isValidGPIOPin(door[field]) !== true) {
+        throw new TypeError('Invalid GPIO pin for ' + field);
+      }
+      if (Object.hasOwn(door, field) === true) {
+        const pin = Number(door[field]);
+        if (assignedPins.has(pin) === true) {
+          throw new TypeError('GPIO pin ' + pin + ' is already assigned to ' + assignedPins.get(pin));
+        }
+        assignedPins.set(pin, 'door ' + (doorIndex + 1) + ' ' + field);
+      }
+    }
+    for (const field of ['name', 'manufacturer', 'model', 'serialNumber', 'hkUsername']) {
+      if (Object.hasOwn(door, field) === true && typeof door[field] !== 'string') {
+        throw new TypeError(field + ' must be a string');
+      }
+    }
+    for (const field of ['openTime', 'closeTime']) {
+      if (
+        Object.hasOwn(door, field) === true &&
+        ((typeof door[field] !== 'number' && (typeof door[field] !== 'string' || door[field].trim() === '')) ||
+          Number.isFinite(Number(door[field])) !== true ||
+          Number(door[field]) < 0 ||
+          Number(door[field]) > 300)
+      ) {
+        throw new TypeError(field + ' must be between 0 and 300 seconds');
+      }
+    }
+    if (
+      Object.hasOwn(door, 'buttonBehavior') === true &&
+      ['stop-then-reverse', 'auto-reverse', 'always-toggle'].includes(door.buttonBehavior) !== true
+    ) {
+      throw new TypeError('Invalid buttonBehavior');
+    }
+  });
+
+  if (Object.hasOwn(loadedConfig, 'options') === true) {
+    const options = loadedConfig.options;
+    if (options === null || typeof options !== 'object' || Array.isArray(options) === true) {
+      throw new TypeError('Configuration options must be an object');
+    }
+    for (const field of ['debug', 'eveHistory']) {
+      if (Object.hasOwn(options, field) === true && typeof options[field] !== 'boolean') {
+        throw new TypeError(field + ' must be a boolean');
+      }
+    }
+    if (
+      Object.hasOwn(options, 'webUIPort') === true &&
+      ((typeof options.webUIPort !== 'number' && (typeof options.webUIPort !== 'string' || options.webUIPort.trim() === '')) ||
+        Number.isInteger(Number(options.webUIPort)) !== true ||
+        Number(options.webUIPort) < 0 ||
+        Number(options.webUIPort) > 65535)
+    ) {
+      throw new TypeError('webUIPort must be an integer from 0 to 65535');
+    }
+    if (
+      Object.hasOwn(options, 'hkPairingCode') === true &&
+      (typeof options.hkPairingCode !== 'string' ||
+        (HomeKitDevice.HK_PIN_3_2_3.test(options.hkPairingCode) !== true && HomeKitDevice.HK_PIN_4_4.test(options.hkPairingCode) !== true))
+    ) {
+      throw new TypeError('Invalid hkPairingCode');
+    }
+    if (Object.hasOwn(options, 'webUIBearerToken') === true && typeof options.webUIBearerToken !== 'string') {
+      throw new TypeError('webUIBearerToken must be a string');
+    }
+  }
+}
+
+function loadConfiguration(filename) {
+  if (typeof filename !== 'string' || filename === '' || fs.existsSync(filename) === false) {
+    return;
+  }
+
+  let loadedConfig = JSON.parse(fs.readFileSync(filename, 'utf8').trim());
+  validateConfiguration(loadedConfig);
 
   let config = {
     doors: [],
@@ -106,28 +185,11 @@ function loadConfiguration(filename) {
     },
   };
 
-  // GPIO is process-wide; reject ownership collisions before any door changes a pin's mode.
-  const assignedPins = new Map();
   Object.entries(loadedConfig).forEach(([key, value]) => {
     if (key === 'doors' && Array.isArray(value) === true) {
-      // Validate doors section
+      // Normalize validated doors and generate missing accessory identities
       let unnamedCount = 1;
-      value.forEach((door, doorIndex) => {
-        if (door === null || typeof door !== 'object' || Array.isArray(door) === true) {
-          throw new TypeError('Each configured door must be an object');
-        }
-        for (let field of ['pushButton', 'closedSensor', 'openSensor', 'obstructionSensor']) {
-          if (Object.hasOwn(door, field) === true && GarageDoor.isValidGPIOPin(door[field]) !== true) {
-            throw new TypeError('Invalid GPIO pin for ' + field);
-          }
-          if (Object.hasOwn(door, field) === true) {
-            const pin = Number(door[field]);
-            if (assignedPins.has(pin) === true) {
-              throw new TypeError('GPIO pin ' + pin + ' is already assigned to ' + assignedPins.get(pin));
-            }
-            assignedPins.set(pin, 'door ' + (doorIndex + 1) + ' ' + field);
-          }
-        }
+      value.forEach((door) => {
         let tempDoor = {
           hkUsername:
             typeof door?.hkUsername === 'string' && door.hkUsername !== ''
@@ -176,7 +238,7 @@ function loadConfiguration(filename) {
           ? value.hkPairingCode
           : ACCESSORY_PINCODE;
       config.options.webUIPort =
-        Number.isFinite(Number(value?.webUIPort)) === true && Number(value.webUIPort) > 0 && Number(value.webUIPort) <= 65535
+        Number.isInteger(Number(value?.webUIPort)) === true && Number(value.webUIPort) > 0 && Number(value.webUIPort) <= 65535
           ? Number(value.webUIPort)
           : 0;
       config.options.webUIBearerToken = typeof value?.webUIBearerToken === 'string' ? value.webUIBearerToken.trim() : '';
@@ -242,6 +304,18 @@ function crc32(valueToHash) {
   return crc32 >>> 0; // return crc32
 }
 
+// Runtime state is available before accessory setup can await publication.
+const devices = [];
+let ui = undefined;
+let shuttingDown = false;
+
+// Register before constructing devices so the application owns shutdown and exit status.
+['SIGINT', 'SIGTERM'].forEach((signal) => {
+  process.once(signal, () => {
+    shutdown(signal, 0);
+  });
+});
+
 // Startup code
 log.success(HomeKitDevice.PLUGIN_NAME + ' v' + version + ' (HAP v' + HAP.HAPLibraryVersion() + ') (Node v' + process.versions.node + ')');
 
@@ -288,89 +362,104 @@ if (config?.options?.debug === true) {
 // For each door in our configuration, create the HomeKit accessory
 let accessories = [];
 
-for (let door of config.doors) {
-  let deviceData = {
-    hkPairingCode: config.options.hkPairingCode,
-    hkUsername: door.hkUsername,
-    serialNumber: door.serialNumber,
-    softwareVersion: version,
-    manufacturer: door.manufacturer,
-    model: door.model,
-    description: (door.manufacturer + ' ' + door.model).trim() || 'Garage Door',
-    eveHistory: config.options.eveHistory,
-    pushButton: door.pushButton,
-    openSensor: door.openSensor,
-    closedSensor: door.closedSensor,
-    obstructionSensor: door.obstructionSensor,
-    openTime: door.openTime,
-    closeTime: door.closeTime,
-    buttonBehavior: door.buttonBehavior,
-  };
+try {
+  for (let door of config.doors) {
+    if (shuttingDown === true) {
+      break;
+    }
+    let deviceData = {
+      hkPairingCode: config.options.hkPairingCode,
+      hkUsername: door.hkUsername,
+      serialNumber: door.serialNumber,
+      softwareVersion: version,
+      manufacturer: door.manufacturer,
+      model: door.model,
+      description: (door.manufacturer + ' ' + door.model).trim() || 'Garage Door',
+      eveHistory: config.options.eveHistory,
+      pushButton: door.pushButton,
+      openSensor: door.openSensor,
+      closedSensor: door.closedSensor,
+      obstructionSensor: door.obstructionSensor,
+      openTime: door.openTime,
+      closeTime: door.closeTime,
+      buttonBehavior: door.buttonBehavior,
+    };
 
-  let tempDevice = new GarageDoor(undefined, HAP, deviceData);
-  let added = await tempDevice.add({
-    hapAccessoryName: 'Garage Door',
-    hapCategory: HAP.Categories.GARAGE_DOOR_OPENER,
-    enableHistory: config.options.eveHistory === true,
-  });
+    let tempDevice = new GarageDoor(undefined, HAP, deviceData);
+    // Retain even partially configured doors so startup failure and signals can release GPIO.
+    devices.push(tempDevice);
+    let added = await tempDevice.add({
+      hapAccessoryName: 'Garage Door',
+      hapCategory: HAP.Categories.GARAGE_DOOR_OPENER,
+      enableHistory: config.options.eveHistory === true,
+    });
 
-  // add() reports setup success; the HAP accessory is exposed on the device.
-  if (added === true) {
-    accessories.push(tempDevice.accessory);
-  } else {
-    log.error('Failed to set up garage door "%s"', door.name);
+    // add() reports setup success; the HAP accessory is exposed on the device.
+    if (added === true) {
+      accessories.push(tempDevice.accessory);
+    } else {
+      throw new Error('Failed to set up garage door "' + door.name + '"');
+    }
+  }
+
+  // Start HomeKit Web UI if configured to do so
+  if (config.options.webUIPort > 0 && shuttingDown === false) {
+    ui = new HomeKitUI({
+      name: 'Garage Door',
+      version,
+      host: '0.0.0.0',
+      port: config.options.webUIPort,
+      auth: {
+        enabled: typeof config.options.webUIBearerToken === 'string' && config.options.webUIBearerToken !== '',
+        bearerToken: config.options.webUIBearerToken,
+      },
+      configFile: configurationFile,
+      schemaFile: CONFIG_SCHEMA_FILE,
+      accessories,
+      hap: HAP,
+      log,
+      logger: Logger,
+      pages: [
+        {
+          id: 'doors',
+          title: 'Garage Doors',
+          svg:
+            '<svg viewBox="0 0 24 24">' +
+            '<path d="M3 11.5 12 4l9 7.5"/>' + // roof
+            '<path d="M5 10.5V21h14V10.5"/>' + // frame
+            '<path d="M8 14h8"/>' + // door line 1
+            '<path d="M8 17h8"/>' + // door line 2
+            '</svg>',
+          schemaPath: 'doors',
+        },
+        {
+          id: 'options',
+          title: 'Options',
+          icon: 'settings',
+          schemaPath: 'options',
+        },
+      ],
+
+      // HomeKitUI validates both saves and restores before its atomic file write.
+      // Keep active GPIO assignments unchanged until the application restarts.
+      onValidateConfig: validateConfiguration,
+
+      onRestart: async () => {
+        await shutdown('restart', 1);
+      },
+    });
+
+    await ui.start();
+  }
+} catch (error) {
+  // Intentional shutdown can cancel add(); the signal handler already owns cleanup.
+  if (shuttingDown === false) {
+    log.error('Failed to start garage door controller: %s', String(error));
+    await shutdown('startup failure', 1);
   }
 }
 
-// Start HomeKit Web UI if configured to do so
-let ui = undefined;
-if (config.options.webUIPort > 0) {
-  ui = new HomeKitUI({
-    name: 'Garage Door',
-    version,
-    host: '0.0.0.0',
-    port: config.options.webUIPort,
-    auth: {
-      enabled: typeof config.options.webUIBearerToken === 'string' && config.options.webUIBearerToken !== '',
-      bearerToken: config.options.webUIBearerToken,
-    },
-    configFile: configurationFile,
-    schemaFile: CONFIG_SCHEMA_FILE,
-    accessories,
-    hap: HAP,
-    log,
-    logger: Logger,
-    pages: [
-      {
-        id: 'doors',
-        title: 'Garage Doors',
-        svg:
-          '<svg viewBox="0 0 24 24">' +
-          '<path d="M3 11.5 12 4l9 7.5"/>' + // roof
-          '<path d="M5 10.5V21h14V10.5"/>' + // frame
-          '<path d="M8 14h8"/>' + // door line 1
-          '<path d="M8 17h8"/>' + // door line 2
-          '</svg>',
-        schemaPath: 'doors',
-      },
-      {
-        id: 'options',
-        title: 'Options',
-        icon: 'settings',
-        schemaPath: 'options',
-      },
-    ],
-
-    onRestart: async () => {
-      await shutdown('restart', 1);
-    },
-  });
-
-  await ui.start();
-}
-
 // Handle process shutdown
-let shuttingDown = false;
 async function shutdown(signal, exitCode = 0) {
   if (shuttingDown === true) {
     return;
@@ -381,11 +470,14 @@ async function shutdown(signal, exitCode = 0) {
   log.warn('Received %s, shutting down gracefully...', signal);
 
   let shutdownExitCode = exitCode;
-  try {
-    await HomeKitDevice.shutdown();
-  } catch (error) {
-    log.error('Failed to shut down garage doors: %s', String(error));
-    shutdownExitCode = 1;
+  // Await each owned device directly: global shutdown isolates errors, while the
+  // application must observe them and still let every door finish its cleanup.
+  const results = await Promise.allSettled(devices.map(async (device) => device.shutdown()));
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      log.error('Failed to shut down garage doors: %s', String(result.reason));
+      shutdownExitCode = 1;
+    }
   }
 
   if (ui !== undefined) {
@@ -399,10 +491,3 @@ async function shutdown(signal, exitCode = 0) {
 
   process.exit(shutdownExitCode);
 }
-
-// Register process signal handlers for graceful shutdown
-['SIGINT', 'SIGTERM'].forEach((signal) => {
-  process.once(signal, () => {
-    shutdown(signal, 0);
-  });
-});

@@ -210,6 +210,18 @@ test('shutdown waits for relay release and later commands cannot actuate', async
   assert.equal(writes.length, 2);
 });
 
+test('shutdown reports GPIO close failures after attempting every configured pin', async (t) => {
+  const { door, closes } = await setup(t, { closedSensor: 26, openSensor: 20, obstructionSensor: 21 });
+  t.mock.method(GPIO, 'close', (pin) => {
+    closes.push(pin);
+    if (pin === 16) {
+      throw new Error('Relay close failed');
+    }
+  });
+  await assert.rejects(door.shutdown(), /Failed to release garage door GPIO pins/);
+  assert.deepEqual(closes, [16, 26, 20, 21]);
+});
+
 test('polling before endpoint departure does not permit a duplicate command pulse', async (t) => {
   const { door, writes, poll, command } = await setup(t, { closedSensor: 26 }, { 26: GPIO.HIGH });
   await command(0);
@@ -245,6 +257,7 @@ test('relay release failures reject instead of committing successful motion', as
   await advance(500);
   await rejected;
   assert.equal(door.getDoorPosition(), GarageDoor.FAULT);
+  await assert.rejects(door.shutdown(), /Failed to release garage door GPIO pins/);
 });
 
 test('fresh endpoint readings prevent a stale resting state from ignoring CLOSE', async (t) => {

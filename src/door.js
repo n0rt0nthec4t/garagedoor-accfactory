@@ -28,7 +28,7 @@
 // - Sensor-based installations can still use timing as fallback for movement inference if desired
 // - GPIO pin numbers must be specified in BCM mode (not physical pin numbers)
 //
-// Code version 2026.10.10
+// Code version 2026.10.11
 // Mark Hulskamp
 'use strict';
 
@@ -453,11 +453,14 @@ export default class GarageDoor extends HomeKitDevice {
   }
 
   async onShutdown() {
+    // Finish all pin cleanup attempts before surfacing failures to the application.
+    const errors = [];
     if (this.#relayFault === true) {
       try {
         GPIO.write(this.deviceData.pushButton, GPIO.LOW);
         this.#relayFault = false;
       } catch (error) {
+        errors.push(error);
         this?.log?.error?.('Failed to release relay during shutdown: %s', String(error));
       }
     }
@@ -467,6 +470,7 @@ export default class GarageDoor extends HomeKitDevice {
         this?.log?.debug?.('Closing pushButton GPIO pin: %s', this.deviceData.pushButton);
         GPIO.close(this.deviceData.pushButton);
       } catch (error) {
+        errors.push(error);
         this?.log?.debug?.('Error closing pushButton GPIO pin: %s', String(error));
       }
     }
@@ -476,6 +480,7 @@ export default class GarageDoor extends HomeKitDevice {
         this?.log?.debug?.('Closing closedSensor GPIO pin: %s', this.deviceData.closedSensor);
         GPIO.close(this.deviceData.closedSensor);
       } catch (error) {
+        errors.push(error);
         this?.log?.debug?.('Error closing closedSensor GPIO pin: %s', String(error));
       }
     }
@@ -485,6 +490,7 @@ export default class GarageDoor extends HomeKitDevice {
         this?.log?.debug?.('Closing openSensor GPIO pin: %s', this.deviceData.openSensor);
         GPIO.close(this.deviceData.openSensor);
       } catch (error) {
+        errors.push(error);
         this?.log?.debug?.('Error closing openSensor GPIO pin: %s', String(error));
       }
     }
@@ -494,8 +500,12 @@ export default class GarageDoor extends HomeKitDevice {
         this?.log?.debug?.('Closing obstructionSensor GPIO pin: %s', this.deviceData.obstructionSensor);
         GPIO.close(this.deviceData.obstructionSensor);
       } catch (error) {
+        errors.push(error);
         this?.log?.debug?.('Error closing obstructionSensor GPIO pin: %s', String(error));
       }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, 'Failed to release garage door GPIO pins');
     }
   }
 
